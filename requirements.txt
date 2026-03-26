@@ -1,0 +1,7 @@
+pytest
+fastapi
+uvicorn
+thefuzz
+pydantic
+openai
+requests

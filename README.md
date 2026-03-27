@@ -1,3 +1,12 @@
+---
+title: CodeReview Env
+emoji: 👾
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+pinned: false
+license: mit
+---
 #  CodeReview-Env: The Ultimate AI Engineer Benchmark
 
 > **Elevator Pitch:** A production-ready OpenEnv benchmark that evaluates an AI agent's ability to act as a Senior Software Engineer doing Pull Request code reviews. It is 100% deterministic (no LLM judge) and punishes hallucination to separate true reasoning agents from noisy pattern-matchers.

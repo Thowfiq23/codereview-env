@@ -19,7 +19,7 @@ client = OpenAI(
 )
 
 # Deterministic evaluation target
-MODEL = "llama-3.1-8b-instant"
+MODEL = "llama-3.3-70b-versatile"
 
 SYSTEM_PROMPT = """
 You are a Senior Security & Performance Software Engineer.

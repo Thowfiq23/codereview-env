@@ -1,48 +1,14 @@
-name: codereview-env
-version: "1.0.0"
-description: >
-  An OpenEnv environment where an AI agent reviews Python pull-request diffs and
-  must identify bugs, security vulnerabilities, and code-quality issues.
-  Three tasks escalate from a single off-by-one bug (easy) to a multi-issue
-  security-heavy PR (hard). All graders are fully deterministic.
-author: your-hf-username
-tags:
-  - openenv
-  - code-review
-  - security
-  - software-engineering
-  - real-world
+env_name: CodeReview-Env
+version: 1.0.0
+description: A real-world PR code review environment. Evaluates an agent's ability to find bugs, security vulnerabilities, and logic flaws using deterministic AST and fuzzy keyword matching.
 tasks:
-  - id: task_1_bug
-    difficulty: easy
-    description: "Find the off-by-one / logic bug in a data-processing function."
-  - id: task_2_security
-    difficulty: medium
-    description: "Identify SQL injection, hardcoded secrets, and weak hashing in an auth module."
-  - id: task_3_multi
-    difficulty: hard
-    description: "Review a full PR diff with 5 mixed issues: bugs, security flaws, and logic errors."
-action_space:
-  type: ReviewAction
-  fields:
-    comments:
-      type: list[ReviewComment]
-      description: List of identified issues with line, type, severity, description
-    summary:
-      type: str
-      description: Overall review summary
-observation_space:
-  type: CodeObservation
-  fields:
-    task_id: str
-    task_description: str
-    code_snippet: str
-    filename: str
-    language: str
-    context: str
-    step_number: int
-    feedback: str | null
+  - task_1_bug
+  - task_2_security
+  - task_3_multi
+action_model: ReviewAction
+observation_model: CodeObservation
 reward_range: [0.0, 1.0]
-max_steps: 3
-docker_image: codereview-env
-hf_space: your-hf-username/codereview-env
+tags:
+  - code-review
+  - python
+  - security

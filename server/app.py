@@ -8,8 +8,8 @@ from typing import Any, Dict
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from ..models import CodeObservation, StepResponse
-from ..tasks import TASKS, list_task_ids
+from models import CodeObservation, StepResponse
+from tasks import TASKS, list_task_ids
 from .environment import CodeReviewEnvironment
 
 app = FastAPI(

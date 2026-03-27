@@ -12,7 +12,7 @@ import re
 from typing import Dict, Any, List, Tuple
 
 from thefuzz import fuzz
-from .models import ReviewAction, ReviewComment
+from models import ReviewAction, ReviewComment
 
 
 def get_ast_blast_radius(code_snippet: str, target_line: int) -> Tuple[int, int]:

@@ -1,6 +1,6 @@
 import pytest
-from codereview_env.grader import evaluate_review, parse_agent_action, get_ast_blast_radius
-from codereview_env.models import ReviewAction, ReviewComment
+from grader import evaluate_review, parse_agent_action, get_ast_blast_radius
+from models import ReviewAction, ReviewComment
 
 def test_parse_agent_action_unbreakable():
     # 1. Clean JSON
@@ -17,13 +17,13 @@ def test_parse_agent_action_unbreakable():
     assert action2 is not None
 
 def test_ast_blast_radius():
-    code = \"\"\"def foo():
+    code = """def foo():
     a = 1
     b = 2
 
 def bar():
     pass
-\"\"\"
+"""
     start, end = get_ast_blast_radius(code, 2)
     assert start == 1 and end == 3  # foo() spans lines 1-3
 

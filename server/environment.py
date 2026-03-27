@@ -7,9 +7,9 @@ Enforces zero-crash policy on malformed actions.
 from typing import Any, Dict
 from uuid import uuid4
 
-from ..models import CodeObservation, ReviewAction, ReviewState, StepResponse
-from ..tasks import TASKS
-from ..grader import evaluate_review, parse_agent_action
+from models import CodeObservation, ReviewAction, ReviewState, StepResponse
+from tasks import TASKS
+from grader import evaluate_review, parse_agent_action
 
 class CodeReviewEnvironment:
     """

@@ -214,7 +214,7 @@ def calculate_fee(amount: float, rate: float = 0.029) -> float:
 ]
 
 def get_task(task_id: str) -> dict:
-    \"\"\"Return a task dict by ID, or raise KeyError.\"\"\"
+    """Return a task dict by ID, or raise KeyError."""
     for t in TASKS:
         if t["id"] == task_id:
             return t

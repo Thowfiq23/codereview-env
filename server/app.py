@@ -12,7 +12,7 @@ from models import CodeObservation, StepResponse
 from tasks import TASKS, list_task_ids, get_task
 from .environment import CodeReviewEnvironment
 from grader import parse_agent_action, evaluate_review
-from baseline.run_baseline import run_evaluation
+from inference import run_evaluation
 
 app = FastAPI(
     title="CodeReview-Env",

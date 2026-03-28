@@ -1,8 +1,8 @@
 """
-codereview_env/baseline/run_baseline.py
+codereview_env/inference.py
 
 Reproducible baseline inference script.
-Connects to Groq using the OpenAI Python client and evaluates "llama-3.1-8b-instant"
+Connects to an LLM using the OpenAI Python client and evaluates it
 against the local CodeReview-Env interface.
 """
 import json
@@ -10,16 +10,16 @@ import os
 import requests
 from openai import OpenAI
 
-# Initialize the Groq-compatible client
-# Expects GROQ_API_KEY to be set in environment variables
-API_KEY = os.getenv("OPENAI_API_KEY") or os.getenv("GROQ_API_KEY", "")
-client = OpenAI(
-    api_key=API_KEY,
-    base_url="https://api.groq.com/openai/v1"
-)
+# Hackathon Required Variables
+API_BASE_URL = os.getenv("API_BASE_URL", "https://api.groq.com/openai/v1")
+MODEL_NAME = os.getenv("MODEL_NAME", "llama-3.3-70b-versatile")
+# Fallbacks included so your local testing still works
+HF_TOKEN = os.getenv("HF_TOKEN") or os.getenv("OPENAI_API_KEY") or os.getenv("GROQ_API_KEY", "")
 
-# Deterministic evaluation target
-MODEL = "llama-3.3-70b-versatile"
+client = OpenAI(
+    api_key=HF_TOKEN,
+    base_url=API_BASE_URL
+)
 
 SYSTEM_PROMPT = """
 You are a Senior Security & Performance Software Engineer.

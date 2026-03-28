@@ -7,7 +7,7 @@ def test_parse_agent_action_unbreakable():
     # 2. Markdown wrapped JSON
     # 3. Malformed JSON with syntax errors
     
-    clean_json = '{"comments": [{"line_number": 1, "issue_type": "bug", "severity": "high", "description": "test"}], "summary": "test"}'
+    clean_json = '{"comments": [{"line_number": 1, "issue_type": "bug", "severity": "high", "description": "This is a test issue."}], "summary": "test summary"}'
     action = parse_agent_action(clean_json)
     assert action is not None
     assert len(action.comments) == 1
@@ -45,8 +45,8 @@ def test_evaluate_review_false_positive_penalty():
     code = "def noop(): pass"
     action = ReviewAction(
         comments=[
-            ReviewComment(line_number=1, issue_type="style", severity="low", description="Bad style"),
-            ReviewComment(line_number=1, issue_type="security", severity="critical", description="Fake bug")
+            ReviewComment(line_number=1, issue_type="style", severity="low", description="Bad style formatting"),
+            ReviewComment(line_number=1, issue_type="security", severity="critical", description="Fake security bug")
         ],
         summary="Found stuff."
     )

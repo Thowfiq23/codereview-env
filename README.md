@@ -122,6 +122,6 @@ pip install -r requirements.txt
 
 # 2. Start the server (ensure you are in the project root)
 export PYTHONPATH=$PWD
-uvicorn server.app:app --host 0.0.0.0 --port 7860 --host 0.0.0.0 --port 7860
+uvicorn server.app:app --host 0.0.0.0 --port 7860
 ```
 

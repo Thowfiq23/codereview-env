@@ -8,7 +8,7 @@ WORKDIR /app
 COPY pyproject.toml .
 
 RUN apt-get update && apt-get install -y --no-install-recommends gcc python3-dev && rm -rf /var/lib/apt/lists/*
-RUN pip install --no-cache-dir "pydantic>=2.0.0" "fastapi>=0.100.0" "uvicorn>=0.23.0" "thefuzz>=0.19.0" "python-levenshtein>=0.20.0" "openai>=1.0.0" "requests>=2.28.0"
+RUN pip install --no-cache-dir "pydantic>=2.0.0" "fastapi>=0.100.0" "uvicorn>=0.23.0" "thefuzz>=0.19.0" "python-levenshtein>=0.20.0" "openai>=1.0.0" "requests>=2.28.0" "anyio>=3.6.0"
 
 # Copy the environment library
 COPY . /app

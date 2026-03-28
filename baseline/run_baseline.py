@@ -12,7 +12,7 @@ from openai import OpenAI
 
 # Initialize the Groq-compatible client
 # Expects GROQ_API_KEY to be set in environment variables
-API_KEY = os.getenv("GROQ_API_KEY", "")
+API_KEY = os.getenv("OPENAI_API_KEY") or os.getenv("GROQ_API_KEY", "")
 client = OpenAI(
     api_key=API_KEY,
     base_url="https://api.groq.com/openai/v1"
@@ -44,30 +44,23 @@ SCHEMA REQUIREMENT:
 If there are no issues, return an empty array for "comments".
 """
 
-def run_evaluation(base_url: str = "http://localhost:7860"):
+def run_evaluation():
     """
-    Runs the baseline inference loop against the target OpenEnv instance.
+    Runs the baseline inference directly against the codebase logic.
     """
     print(f"\n[=>] Starting Baseline Evaluation using {MODEL}")
-    print(f"[=>] Environment URL: {base_url}\n")
 
-    try:
-        reset_resp = requests.post(f"{base_url}/reset")
-        reset_resp.raise_for_status()
-    except requests.exceptions.RequestException as e:
-        print(f"[!] Failed to connect to environment at {base_url}. Is the server running?\n{e}")
-        return
-
-    obs = reset_resp.json()
-    done = obs.get("done", False)
-    
+    done = False
     total_reward = 0.0
     task_count = 0
 
-    while not done:
-        task_id = obs.get('task_id', 'unknown')
-        code_snip = obs.get('code_snippet', '')
-        desc = obs.get('task_description', '')
+    # Start by getting the first task from tasks.py directly without HTTP
+    from tasks import TASKS
+    
+    for task in TASKS:
+        task_id = task.get('id', 'unknown')
+        code_snip = task.get('code_snippet', '')
+        desc = task.get('task_description', '')
         
         print(f"\n--- Task #{task_count + 1}: {task_id} ---")
         
@@ -82,7 +75,7 @@ def run_evaluation(base_url: str = "http://localhost:7860"):
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": user_prompt}
                 ],
-                temperature=0.0,  # Zero temperature for maximum deterministic behavior
+                temperature=0.0,
             )
             raw_output = chat_completion.choices[0].message.content
         except Exception as e:
@@ -90,25 +83,19 @@ def run_evaluation(base_url: str = "http://localhost:7860"):
             print("[!] Providing empty string to environment to continue episode.")
             raw_output = ""
 
-        # 3. Submit Action to Environment
-        # The environment handles malformed JSON parsing safely
-        try:
-            step_resp = requests.post(
-                f"{base_url}/step",
-                data=raw_output,  # Sending raw text directly as instructed
-                headers={"Content-Type": "text/plain"}
+        # 3. Grade the result directly
+        from grader import parse_agent_action, evaluate_review
+        
+        action = parse_agent_action(raw_output)
+        if action is None:
+            reward = 0.0
+            info = {"error": "Invalid action format."}
+        else:
+            reward, info = evaluate_review(
+                agent_action=action,
+                code_snippet=code_snip,
+                ground_truth_issues=task["ground_truth_issues"]
             )
-            step_resp.raise_for_status()
-            step_data = step_resp.json()
-        except requests.exceptions.RequestException as e:
-            print(f"[!] Environment Step Error: {e}")
-            break
-
-        # 4. Extract next state
-        reward = step_data.get("reward", 0.0)
-        info = step_data.get("info", {})
-        obs = step_data.get("observation", {})
-        done = step_data.get("done", False)
 
         total_reward += reward
         task_count += 1
@@ -135,7 +122,7 @@ def run_evaluation(base_url: str = "http://localhost:7860"):
 
 if __name__ == "__main__":
     if not API_KEY:
-        print("[WARN] GROQ_API_KEY environment variable not set.")
-        print("[WARN] Connection to Groq might fail unless default fallback is configured.\n")
+        print("[WARN] OPENAI_API_KEY or GROQ_API_KEY environment variable not set.")
+        print("[WARN] Connection to API might fail unless default fallback is configured.\n")
     
     run_evaluation()

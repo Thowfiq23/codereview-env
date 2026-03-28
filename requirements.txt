@@ -3,5 +3,6 @@ fastapi
 uvicorn
 thefuzz
 pydantic
-openai
+openai>=1.0.0
+python-levenshtein>=0.20.0
 requests

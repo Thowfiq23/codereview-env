@@ -130,11 +130,11 @@ async def grader_endpoint(request: Request, task_id: str = "task_1_bug") -> Dict
 
 @app.post("/baseline")
 async def baseline_endpoint() -> Dict[str, Any]:
-    """Triggers the inference script and returns the baseline score."""
-    # We run it pointing to the local FastAPI server
-    results = run_evaluation(base_url="http://127.0.0.1:7860")
-    
-    if results is None:
-        return {"error": "Baseline evaluation failed."}
-        
-    return results
+    """Triggers the inference script directly and returns the baseline score."""
+    import anyio
+
+    try:
+        results = await anyio.to_thread.run_sync(run_evaluation)
+        return results
+    except Exception as e:
+        return {"error": f"Baseline evaluation failed: {e}"}

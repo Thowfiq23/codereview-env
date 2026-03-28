@@ -12,7 +12,6 @@ from models import CodeObservation, StepResponse
 from tasks import TASKS, list_task_ids, get_task
 from .environment import CodeReviewEnvironment
 from grader import parse_agent_action, evaluate_review
-from inference import run_evaluation
 
 app = FastAPI(
     title="CodeReview-Env",
@@ -132,6 +131,7 @@ async def grader_endpoint(request: Request, task_id: str = "task_1_bug") -> Dict
 async def baseline_endpoint() -> Dict[str, Any]:
     """Triggers the inference script directly and returns the baseline score."""
     import anyio
+    from inference import run_evaluation
 
     try:
         results = await anyio.to_thread.run_sync(run_evaluation)

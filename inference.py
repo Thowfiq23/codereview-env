@@ -48,7 +48,7 @@ def run_evaluation():
     """
     Runs the baseline inference directly against the codebase logic.
     """
-    print(f"\n[=>] Starting Baseline Evaluation using {MODEL}")
+    print(f"\n[=>] Starting Baseline Evaluation using {MODEL_NAME}")
 
     done = False
     total_reward = 0.0
@@ -70,7 +70,7 @@ def run_evaluation():
         # 2. Query model deterministically
         try:
             chat_completion = client.chat.completions.create(
-                model=MODEL,
+                model=MODEL_NAME,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": user_prompt}
@@ -117,12 +117,12 @@ def run_evaluation():
     return {
         "average_score": avg_score,
         "tasks_evaluated": task_count,
-        "model_used": MODEL
+        "model_used": MODEL_NAME
     }
 
 if __name__ == "__main__":
-    if not API_KEY:
-        print("[WARN] OPENAI_API_KEY or GROQ_API_KEY environment variable not set.")
+    if not HF_TOKEN:
+        print("[WARN] HF_TOKEN / OPENAI_API_KEY / GROQ_API_KEY not set.")
         print("[WARN] Connection to API might fail unless default fallback is configured.\n")
     
     run_evaluation()

@@ -92,7 +92,7 @@ We hit 100% of the OpenEnv specifications:
 - [x] Docker runs seamlessly on port 7860.
 - [x] Fully typed Pydantic models for actions and observations (`ReviewAction`, `CodeObservation`).
 - [x] `openenv.yaml` manifest correctly configured.
-- [x] `/reset`, `/step`, `/state`, `/tasks`, and `/health` endpoints implemented.
+- [x] `/reset`, `/step`, `/state`, `/tasks`, `/grader`, `/baseline`, and `/health` endpoints implemented.
 - [x] Deterministic grader returns a strict `[0.0, 1.0]` float per step.
 
 ---

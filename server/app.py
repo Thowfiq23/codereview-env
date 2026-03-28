@@ -9,8 +9,10 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from models import CodeObservation, StepResponse
-from tasks import TASKS, list_task_ids
+from tasks import TASKS, list_task_ids, get_task
 from .environment import CodeReviewEnvironment
+from grader import parse_agent_action, evaluate_review
+from baseline.run_baseline import run_evaluation
 
 app = FastAPI(
     title="CodeReview-Env",
@@ -97,3 +99,42 @@ async def get_tasks_info() -> Dict[str, Any]:
         "total_tasks": len(TASKS),
         "action_schema": action_schema
     }
+
+@app.post("/grader")
+async def grader_endpoint(request: Request, task_id: str = "task_1_bug") -> Dict[str, Any]:
+    """Evaluates a raw action string against a specific task without advancing environment state."""
+    body_bytes = await request.body()
+    try:
+        raw_text = body_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        raw_text = ""
+
+    action = parse_agent_action(raw_text)
+    
+    try:
+        task = get_task(task_id)
+    except KeyError:
+        return {"score": 0.0, "error": f"Task '{task_id}' not found."}
+
+    if action is None:
+        return {"score": 0.0, "error": "Invalid action format. Could not parse JSON."}
+
+    reward, info = evaluate_review(
+        agent_action=action, 
+        code_snippet=task["code_snippet"], 
+        ground_truth_issues=task["ground_truth_issues"]
+    )
+    
+    info["score"] = reward
+    return info
+
+@app.post("/baseline")
+async def baseline_endpoint() -> Dict[str, Any]:
+    """Triggers the inference script and returns the baseline score."""
+    # We run it pointing to the local FastAPI server
+    results = run_evaluation(base_url="http://127.0.0.1:7860")
+    
+    if results is None:
+        return {"error": "Baseline evaluation failed."}
+        
+    return results

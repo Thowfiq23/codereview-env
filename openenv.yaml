@@ -1,5 +1,9 @@
 env_name: CodeReview-Env
 version: 1.0.0
+author: Thowfiq23
+hf_space: Thowfiq23/CodeReview-Env
+docker_image: codereview-env
+max_steps: 3
 description: A real-world PR code review environment. Evaluates an agent's ability to find bugs, security vulnerabilities, and logic flaws using deterministic AST and fuzzy keyword matching.
 tasks:
   - task_1_bug

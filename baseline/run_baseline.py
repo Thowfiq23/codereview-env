@@ -127,6 +127,12 @@ def run_evaluation(base_url: str = "http://localhost:7860"):
     print(f"Average Score: {avg_score:.4f} / 1.0000")
     print(f"{'='*40}\n")
 
+    return {
+        "average_score": avg_score,
+        "tasks_evaluated": task_count,
+        "model_used": MODEL
+    }
+
 if __name__ == "__main__":
     if not API_KEY:
         print("[WARN] GROQ_API_KEY environment variable not set.")

@@ -6,6 +6,8 @@ colorTo: indigo
 sdk: docker
 pinned: false
 license: mit
+tags:
+  - openenv
 ---
 #  CodeReview-Env: The Ultimate AI Engineer Benchmark
 

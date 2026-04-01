@@ -1,4 +1,4 @@
-from .models import ReviewAction, ReviewComment, CodeObservation, ReviewState, GraderResult
+from models import ReviewAction, ReviewComment, CodeObservation, ReviewState, GraderResult
 from .tasks import TASKS, get_task, list_task_ids
 
 __all__ = [

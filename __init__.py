@@ -1,5 +1,6 @@
 from models import ReviewAction, ReviewComment, CodeObservation, ReviewState, GraderResult
-from .tasks import TASKS, get_task, list_task_ids
+from tasks import TASKS, get_task, list_task_ids
+from grader import evaluate_review
 
 __all__ = [
     "ReviewAction",
@@ -10,4 +11,5 @@ __all__ = [
     "TASKS",
     "get_task",
     "list_task_ids",
+    "evaluate_review",
 ]

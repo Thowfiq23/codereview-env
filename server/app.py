@@ -35,21 +35,20 @@ async def reset_env() -> CodeObservation:
     return env.reset()
 
 
-@app.post("/step", response_model=StepResponse)
-async def step_env(request: Request) -> StepResponse:
-    """
-    Submit an action (review response) to the environment.
-    We accept the raw Request body so FastAPI validation doesn't crash on 
-    malformed markdown or bad JSON before our unbreakable parser can handle it.
-    """
-    # Extract the raw payload text regardless of headers/content-type
-    body_bytes = await request.body()
-    try:
-        raw_text = body_bytes.decode("utf-8")
-    except UnicodeDecodeError:
-        raw_text = ""
-
-    return env.step(raw_text)
+@app.post("/step")
+async def step_env(request: Request):
+    raw_text = (await request.body()).decode("utf-8")
+    
+    # 1. Get the tuple from the environment
+    obs, reward, done, info = env.step(raw_text)
+    
+    # 2. Unpack it into a clean JSON dictionary for FastAPI
+    return {
+        "observation": obs.model_dump(), 
+        "reward": float(reward),
+        "done": bool(done),
+        "info": info
+    }
 
 
 @app.get("/state")
@@ -138,3 +137,11 @@ async def baseline_endpoint() -> Dict[str, Any]:
         return results
     except Exception as e:
         return {"error": f"Baseline evaluation failed: {e}"}
+
+def main():
+    import uvicorn
+    # Make sure this matches your folder structure!
+    uvicorn.run("server.app:app", host="0.0.0.0", port=7860)
+
+if __name__ == "__main__":
+    main()

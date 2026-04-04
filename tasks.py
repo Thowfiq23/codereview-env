@@ -1,225 +1,98 @@
-"""
-codereview_env/tasks.py
-Complete task dataset: 3 tasks with code snippets and ground-truth issues.
-All graders use deterministic AST + fuzzy matching.
-"""
+from typing import List, Dict, Any
 
-TASKS = [
-    # ─────────────────────────────────────────────────────────────────────────
-    # TASK 1 — EASY
-    # Single off-by-one bug in a data-processing function.
-    # ─────────────────────────────────────────────────────────────────────────
+TASKS: List[Dict[str, Any]] = [
+    # --- TASK 1: EASY (Security Basics) ---
     {
-        "id": "task_1_bug",
-        "difficulty": "easy",
-        "filename": "data_processor.py",
-        "language": "python",
-        "context": (
-            "This module is used in a sensor-data aggregation pipeline. "
-            "compute_average() is called thousands of times per second."
-        ),
-        "task_description": (
-            "Review this Python function for correctness bugs. "
-            "Look for logic errors, off-by-one mistakes, or incorrect computations."
-        ),
-        "code_snippet": """\
-def compute_average(numbers: list) -> float:
-    \"\"\"Return the average of a list of numbers.\"\"\"
-    if not numbers:
-        return 0.0
-
-    total = 0
-    for i in range(1, len(numbers)):   # BUG: skips index 0
-        total += numbers[i]
-
-    return total / len(numbers)
-
-
-def normalize(data: list) -> list:
-    \"\"\"Normalize values to [0, 1] relative to max.\"\"\"
-    avg = compute_average(data)
-    max_val = max(data) if data else 1
-    return [(x - avg) / max_val for x in data]
-""",
+        "task_id": "task_1_pr",
+        "description": "PR #42: Add user authentication and password hashing. Please review for security bugs.",
+        "repository": {
+            "README.md": "# Auth Module\nHandles user login.",
+            "auth/models.py": "def get_user_query(username):\n    # Vulnerable to SQL injection\n    return f\"SELECT * FROM users WHERE username = '{username}'\"",
+            "auth/crypto.py": "import hashlib\n\ndef hash_password(password: str):\n    # MD5 is weak/broken\n    return hashlib.md5(password.encode()).hexdigest()\n",
+            "main.py": "from auth.models import get_user_query\nfrom auth.crypto import hash_password\n\nSECRET_KEY = 'hardcoded_super_secret_key'\n"
+        },
         "ground_truth_issues": [
             {
-                "line_number": 7,
-                "correct_type": "bug",
-                "correct_severity": "high",
-                "match_keywords": "range index off-by-one skips first element starts 1 loop zero",
-            }
-        ],
-    },
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # TASK 2 — MEDIUM
-    # Authentication module with 3 security issues.
-    # ─────────────────────────────────────────────────────────────────────────
-    {
-        "id": "task_2_security",
-        "difficulty": "medium",
-        "filename": "user_auth.py",
-        "language": "python",
-        "context": (
-            "This module handles user login for a customer-facing web application "
-            "with ~50 000 registered accounts."
-        ),
-        "task_description": (
-            "Review this authentication module for security vulnerabilities. "
-            "Look for SQL injection, hardcoded secrets, and weak cryptographic choices."
-        ),
-        "code_snippet": """\
-import sqlite3
-import hashlib
-
-SECRET_KEY = "mysecretkey123"       # ISSUE 1: hardcoded secret
-
-def get_db():
-    return sqlite3.connect("users.db")
-
-def login(username: str, password: str) -> bool:
-    \"\"\"Return True if credentials are valid.\"\"\"
-    db = get_db()
-    cursor = db.cursor()
-
-    # ISSUE 2: SQL injection
-    query = f"SELECT * FROM users WHERE username = '{username}' AND password = '{password}'"
-    cursor.execute(query)
-    user = cursor.fetchone()
-    db.close()
-    return user is not None
-
-def hash_password(password: str) -> str:
-    \"\"\"Hash a password before storing.\"\"\"
-    # ISSUE 3: MD5 is cryptographically broken
-    return hashlib.md5(password.encode()).hexdigest()
-""",
-        "ground_truth_issues": [
+                "file_path": "auth/models.py",
+                "line_number": 3,
+                "correct_type": "security",
+                "correct_severity": "critical",
+                "description": "SQL Injection vulnerability in f-string query",
+                "match_keywords": "sql,injection,f-string"
+            },
             {
+                "file_path": "auth/crypto.py",
                 "line_number": 4,
                 "correct_type": "security",
                 "correct_severity": "high",
-                "match_keywords": "hardcoded SECRET_KEY environ environment secret plaintext env var config",
-            },
-            {
-                "line_number": 15,
-                "correct_type": "security",
-                "correct_severity": "critical",
-                "match_keywords": "sql injection f-string parameterised parameterized format string interpolat",
-            },
-            {
-                "line_number": 24,
-                "correct_type": "security",
-                "correct_severity": "high",
-                "match_keywords": "md5 broken weak bcrypt argon2 pbkdf2 cryptographic hashing deprecated",
-            },
-        ],
+                "description": "Using weak MD5 hashing algorithm",
+                "match_keywords": "md5,weak,hashing"
+            }
+        ]
     },
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # TASK 3 — HARD
-    # Payment processor with 5 mixed issues.
-    # ─────────────────────────────────────────────────────────────────────────
+    
+    # --- TASK 2: MEDIUM (Logic Bugs across files) ---
     {
-        "id": "task_3_multi",
-        "difficulty": "hard",
-        "filename": "payment_processor.py",
-        "language": "python",
-        "context": (
-            "This PR adds a new payment processing module to a fintech API. "
-            "It handles charging users and logging transactions."
-        ),
-        "task_description": (
-            "Review this payment-processing PR diff. It contains a mix of bugs, "
-            "security issues, and logic errors. Find ALL issues."
-        ),
-        "code_snippet": """\
-import os
-import logging
-import requests
-
-API_KEY = "sk-live-abc123XYZ"        # ISSUE 1: hardcoded API key
-
-logger = logging.getLogger(__name__)
-
-
-def charge_user(user_id: int, amount: float, currency: str = "USD") -> dict:
-    \"\"\"Charge a user via the external payments API.\"\"\"
-
-    # ISSUE 2: missing validation for negative amounts
-    payload = {
-        "user_id": user_id,
-        "amount": amount,
-        "currency": currency,
-    }
-
-    response = requests.post(
-        "https://payments.internal/charge",
-        json=payload,
-        headers={"Authorization": f"Bearer {API_KEY}"},
-        # ISSUE 3: no timeout mapped
-    )
-
-    if response.status_code != 200:
-        logger.error(f"Charge failed for user {user_id}: {response.text}")
-        return {"success": False}
-
-    return response.json()
-
-
-def log_transaction(user_id: int, amount: float, status: str) -> None:
-    \"\"\"Write transaction record to the audit log.\"\"\"
-    # ISSUE 4: sensitive data in plaintext log
-    logger.info(f"Transaction: user={user_id} amount={amount} status={status}")
-
-
-def calculate_fee(amount: float, rate: float = 0.029) -> float:
-    \"\"\"Calculate the processing fee.\"\"\"
-    # ISSUE 5: float math for currency
-    return amount * rate
-""",
+        "task_id": "task_2_pr",
+        "description": "PR #88: Implement shopping cart billing and discount logic. Please review for correctness.",
+        "repository": {
+            "billing/cart.py": "from billing.discounts import apply_discount\n\ndef calculate_total(items):\n    total = 0\n    for item in items:\n        total += item['price'] # BUG: Forgot to multiply by item['quantity']!\n    return apply_discount(total)\n",
+            "billing/discounts.py": "def apply_discount(amount):\n    # BUG: Applies 20% discount but accidentally returns just the discount amount, not the new total!\n    return amount * 0.20\n"
+        },
         "ground_truth_issues": [
             {
-                "line_number": 5,
+                "file_path": "billing/cart.py",
+                "line_number": 6,
+                "correct_type": "logic",
+                "correct_severity": "high",
+                "description": "Fails to multiply item price by quantity",
+                "match_keywords": "quantity,multiply,amount,price"
+            },
+            {
+                "file_path": "billing/discounts.py",
+                "line_number": 3,
+                "correct_type": "logic",
+                "correct_severity": "high",
+                "description": "Returns the discount amount instead of the discounted total",
+                "match_keywords": "subtract,total,discount amount,return"
+            }
+        ]
+    },
+
+    # --- TASK 3: HARD (Hidden Security & Performance) ---
+    {
+        "task_id": "task_3_pr",
+        "description": "PR #105: Integrate Stripe payment processor and user caching.",
+        "repository": {
+            "payments/config.py": "import os\n\nSTRIPE_TEST_KEY = os.getenv('STRIPE_TEST_KEY')\nSTRIPE_LIVE_KEY = 'sk_live_9876543210qwerty' # CRITICAL: Hardcoded live API key\n",
+            "payments/processor.py": "from payments.config import STRIPE_LIVE_KEY\nimport time\n\ndef process_payment(user_id, amount):\n    # Performance issue: synchronous sleep mimicking network\n    time.sleep(5)\n    return True\n"
+        },
+        "ground_truth_issues": [
+            {
+                "file_path": "payments/config.py",
+                "line_number": 4,
                 "correct_type": "security",
                 "correct_severity": "critical",
-                "match_keywords": "hardcoded live api key secret token source environment sk-live",
+                "description": "Hardcoded live Stripe API key exposed in source code",
+                "match_keywords": "hardcoded,live,stripe,sk_live,key"
             },
             {
-                "line_number": 14,
-                "correct_type": "bug",
-                "correct_severity": "high",
-                "match_keywords": "validat check negative amount zero assert raise ValueError positive",
-            },
-            {
-                "line_number": 20,
-                "correct_type": "bug",
-                "correct_severity": "high",
-                "match_keywords": "timeout hang block indefinitely requests post thread stuck",
-            },
-            {
-                "line_number": 37,
-                "correct_type": "security",
-                "correct_severity": "high",
-                "match_keywords": "sensitive plaintext log mask redact financial money audit pii",
-            },
-            {
-                "line_number": 43,
-                "correct_type": "bug",
+                "file_path": "payments/processor.py",
+                "line_number": 6,
+                "correct_type": "performance",
                 "correct_severity": "medium",
-                "match_keywords": "float floating-point decimal precise money rounding arithmetic",
-            },
-        ],
-    },
+                "description": "Synchronous blocking sleep call halts the entire thread",
+                "match_keywords": "sleep,synchronous,blocking,performance"
+            }
+        ]
+    }
 ]
 
-def get_task(task_id: str) -> dict:
-    """Return a task dict by ID, or raise KeyError."""
+def get_task(task_id: str) -> Dict[str, Any]:
     for t in TASKS:
-        if t["id"] == task_id:
+        if t["task_id"] == task_id:
             return t
-    raise KeyError(f"Unknown task_id: {task_id!r}")
+    raise ValueError(f"Task {task_id} not found")
 
-def list_task_ids() -> list:
-    return [t["id"] for t in TASKS]
-
+def list_task_ids() -> List[str]:
+    return [t["task_id"] for t in TASKS]

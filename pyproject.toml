@@ -31,3 +31,6 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["codereview_env*"]
+
+[project.scripts]
+server = "server.app:main"

@@ -11,36 +11,48 @@ from pydantic import BaseModel, Field
 # ── Action ────────────────────────────────────────────────────────────────────
 
 class ReviewComment(BaseModel):
-    """A single issue identified by the agent in the code under review."""
-    line_number: int = Field(..., description="1-indexed line number where the issue was found.", ge=1)
-    issue_type: Literal["bug", "security", "style", "performance", "logic"] = Field(..., description="Category of the issue.")
-    severity: Literal["low", "medium", "high", "critical"] = Field(..., description="Severity level.")
-    description: str = Field(..., description="Human-readable explanation of the issue.", min_length=10)
-    suggested_fix: Optional[str] = Field(default=None, description="Optional suggested correction.")
+    file_path: str = Field(..., description="The exact path of the file being commented on.")
+    line_number: int = Field(..., ge=1)
+    issue_type: Literal["bug", "security", "style", "performance", "logic"]
+    severity: Literal["low", "medium", "high", "critical"]
+    description: str = Field(..., min_length=10)
+    suggested_fix: Optional[str] = None
 
-class ReviewAction(BaseModel):
+class AgentAction(BaseModel):
     """
-    The agent's complete review of the code snippet.
-    Submit a list of ReviewComment objects, one per identified issue.
-    Submit an empty list if no issues are found.
+    The unified action space. The agent must choose ONE action_type per step.
+    If action_type is 'read_file', it must provide 'target_file'.
+    If action_type is 'search_code', it must provide 'search_query'.
+    If action_type is 'submit_review', it must provide 'review_comments' and 'summary'.
     """
-    comments: List[ReviewComment] = Field(default_factory=list, description="List of review comments.")
-    summary: str = Field(default="", description="Overall summary of review findings.")
+    action_type: Literal["read_file", "search_code", "submit_review"] = Field(
+        ..., description="The tool you want to use for this step."
+    )
+    
+    # Tool 1 Parameters
+    target_file: Optional[str] = Field(None, description="Used with 'read_file'. The path of the file to open.")
+    
+    # Tool 2 Parameters
+    search_query: Optional[str] = Field(None, description="Used with 'search_code'. The exact string to search for across the repo.")
+    
+    # Tool 3 Parameters (The Final Action)
+    review_comments: Optional[List[ReviewComment]] = Field(None, description="Used with 'submit_review'. List of findings.")
+    summary: Optional[str] = Field(None, description="Used with 'submit_review'. Overall PR summary.")
 
 # ── Observation ───────────────────────────────────────────────────────────────
 
 class CodeObservation(BaseModel):
-    """What the agent sees: a code snippet (PR diff) plus metadata."""
-    task_id: str = Field(..., description="Unique ID of the current task.")
-    task_description: str = Field(..., description="Instruction telling the agent what to look for.")
-    code_snippet: str = Field(..., description="The Python code to review.")
-    filename: str = Field(..., description="File name of the code being reviewed.")
-    language: str = Field(default="python", description="Programming language.")
-    context: str = Field(default="", description="Background: what the code is supposed to do.")
-    step_number: int = Field(default=0, description="Current step within the episode.")
-    feedback: Optional[str] = Field(default=None, description="Grader feedback from the previous step.")
-    done: bool = Field(default=False, description="Whether the episode has ended.")
-    reward: float = Field(default=0.0, description="Reward from the previous step.")
+    task_id: str
+    context: str = Field(..., description="The PR description or current state context.")
+    available_files: List[str] = Field(..., description="Files modified in this PR.")
+    
+    # The result of the agent's last action (e.g., file contents, search results, or error messages)
+    action_result: Optional[str] = None 
+    
+    step_number: int
+    feedback: Optional[str] = None
+    done: bool
+    reward: float
 
 # ── Environment Interop ───────────────────────────────────────────────────────
 

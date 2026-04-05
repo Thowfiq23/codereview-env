@@ -77,16 +77,19 @@ class CodeReviewEnvironment:
             done = False
             info = {}
 
+            # MAGIC FIX: Tell the terminal where the python files are!
+            run_env = os.environ.copy()
+            run_env["PYTHONPATH"] = self.workspace_dir
+
             # --- TOOL 1: EXECUTE COMMAND (Real Linux Bash) ---
             if action_obj.action_type == "execute_command":
                 cmd = action_obj.command
                 if not cmd:
                     obs_result = "Error: No bash command provided."
                 else:
-                    # Run the command physically in the workspace directory
                     result = subprocess.run(
                         cmd, cwd=self.workspace_dir, shell=True, 
-                        capture_output=True, text=True, timeout=15
+                        capture_output=True, text=True, timeout=15, env=run_env
                     )
                     output = result.stdout if result.stdout else result.stderr
                     obs_result = f"--- BASH OUTPUT (Exit Code {result.returncode}) ---\n{output}"
@@ -109,17 +112,16 @@ class CodeReviewEnvironment:
 
             # --- TOOL 3: SUBMIT REVIEW (The Execution Grader) ---
             elif action_obj.action_type == "submit_review":
-                # The ultimate test: We run pytest on their code!
                 result = subprocess.run(
                     "pytest tests/", cwd=self.workspace_dir, shell=True, 
-                    capture_output=True, text=True, timeout=15
+                    capture_output=True, text=True, timeout=15, env=run_env
                 )
                 
                 if result.returncode == 0:
-                    reward = 1.0  # PERFECT SCORE! They actually fixed the app.
+                    reward = 1.0  
                     feedback = "SUCCESS! All tests passed in the sandbox."
                 else:
-                    reward = 0.0  # Tests still failing.
+                    reward = 0.0  
                     feedback = f"FAILED! Tests are still failing.\n{result.stdout[-500:]}"
                     
                 obs_result = f"Evaluation complete. {feedback}"

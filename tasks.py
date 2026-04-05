@@ -1,90 +1,66 @@
 from typing import List, Dict, Any
 
 TASKS: List[Dict[str, Any]] = [
-    # --- TASK 1: EASY (Security Basics) ---
     {
         "task_id": "task_1_pr",
-        "description": "PR #42: Add user authentication and password hashing. Please review for security bugs.",
+        "description": "PR #42: Add user authentication. The CI/CD pipeline is failing security checks. Fix the bugs and make the tests pass.",
         "repository": {
-            "README.md": "# Auth Module\nHandles user login.",
             "auth/models.py": "def get_user_query(username):\n    # Vulnerable to SQL injection\n    return f\"SELECT * FROM users WHERE username = '{username}'\"",
             "auth/crypto.py": "import hashlib\n\ndef hash_password(password: str):\n    # MD5 is weak/broken\n    return hashlib.md5(password.encode()).hexdigest()\n",
-            "main.py": "from auth.models import get_user_query\nfrom auth.crypto import hash_password\n\nSECRET_KEY = 'hardcoded_super_secret_key'\n"
-        },
-        "ground_truth_issues": [
-            {
-                "file_path": "auth/models.py",
-                "line_number": 3,
-                "correct_type": "security",
-                "correct_severity": "critical",
-                "description": "SQL Injection vulnerability in f-string query",
-                "match_keywords": "sql,injection,f-string"
-            },
-            {
-                "file_path": "auth/crypto.py",
-                "line_number": 4,
-                "correct_type": "security",
-                "correct_severity": "high",
-                "description": "Using weak MD5 hashing algorithm",
-                "match_keywords": "md5,weak,hashing"
-            }
-        ]
+            "tests/test_auth.py": """
+from auth.models import get_user_query
+from auth.crypto import hash_password
+import inspect
+
+def test_sql_injection_fixed():
+    query = get_user_query('admin')
+    assert '%s' in query or '?' in query, "Security Error: Code is still vulnerable to SQL Injection (use %s or ?)"
+
+def test_crypto_fixed():
+    source = inspect.getsource(hash_password)
+    assert 'md5' not in source.lower(), "Security Error: Weak MD5 hashing is still being used."
+"""
+        }
     },
-    
-    # --- TASK 2: MEDIUM (Logic Bugs across files) ---
     {
         "task_id": "task_2_pr",
-        "description": "PR #88: Implement shopping cart billing and discount logic. Please review for correctness.",
+        "description": "PR #88: Implement shopping cart billing. Logic is failing. Fix the code so tests pass.",
         "repository": {
-            "billing/cart.py": "from billing.discounts import apply_discount\n\ndef calculate_total(items):\n    total = 0\n    for item in items:\n        total += item['price'] # BUG: Forgot to multiply by item['quantity']!\n    return apply_discount(total)\n",
-            "billing/discounts.py": "def apply_discount(amount):\n    # BUG: Applies 20% discount but accidentally returns just the discount amount, not the new total!\n    return amount * 0.20\n"
-        },
-        "ground_truth_issues": [
-            {
-                "file_path": "billing/cart.py",
-                "line_number": 6,
-                "correct_type": "logic",
-                "correct_severity": "high",
-                "description": "Fails to multiply item price by quantity",
-                "match_keywords": "quantity,multiply,amount,price"
-            },
-            {
-                "file_path": "billing/discounts.py",
-                "line_number": 3,
-                "correct_type": "logic",
-                "correct_severity": "high",
-                "description": "Returns the discount amount instead of the discounted total",
-                "match_keywords": "subtract,total,discount amount,return"
-            }
-        ]
-    },
+            "billing/cart.py": "from billing.discounts import apply_discount\n\ndef calculate_total(items):\n    total = 0\n    for item in items:\n        total += item['price']\n    return apply_discount(total)\n",
+            "billing/discounts.py": "def apply_discount(amount):\n    return amount * 0.20\n",
+            "tests/test_billing.py": """
+from billing.cart import calculate_total
+from billing.discounts import apply_discount
 
-    # --- TASK 3: HARD (Hidden Security & Performance) ---
+def test_cart_total():
+    items = [{'price': 10, 'quantity': 2}, {'price': 20, 'quantity': 1}]
+    # 10*2 + 20*1 = 40. Minus 20% = 32.
+    assert calculate_total(items) == 32, "Logic Error: calculate_total did not account for quantity correctly."
+
+def test_discount():
+    assert apply_discount(100) == 80, "Logic Error: apply_discount returned the wrong final amount."
+"""
+        }
+    },
     {
         "task_id": "task_3_pr",
-        "description": "PR #105: Integrate Stripe payment processor and user caching.",
+        "description": "PR #105: Integrate Stripe payment processor. Performance timeout.",
         "repository": {
-            "payments/config.py": "import os\n\nSTRIPE_TEST_KEY = os.getenv('STRIPE_TEST_KEY')\nSTRIPE_LIVE_KEY = 'sk_live_9876543210qwerty' # CRITICAL: Hardcoded live API key\n",
-            "payments/processor.py": "from payments.config import STRIPE_LIVE_KEY\nimport time\n\ndef process_payment(user_id, amount):\n    # Performance issue: synchronous sleep mimicking network\n    time.sleep(5)\n    return True\n"
-        },
-        "ground_truth_issues": [
-            {
-                "file_path": "payments/config.py",
-                "line_number": 4,
-                "correct_type": "security",
-                "correct_severity": "critical",
-                "description": "Hardcoded live Stripe API key exposed in source code",
-                "match_keywords": "hardcoded,live,stripe,sk_live,key"
-            },
-            {
-                "file_path": "payments/processor.py",
-                "line_number": 6,
-                "correct_type": "performance",
-                "correct_severity": "medium",
-                "description": "Synchronous blocking sleep call halts the entire thread",
-                "match_keywords": "sleep,synchronous,blocking,performance"
-            }
-        ]
+            "payments/config.py": "import os\n\nSTRIPE_TEST_KEY = os.getenv('STRIPE_TEST_KEY')\nSTRIPE_LIVE_KEY = 'sk_live_9876543210qwerty'\n",
+            "payments/processor.py": "import time\n\ndef process_payment(user_id, amount):\n    time.sleep(5)\n    return True\n",
+            "tests/test_payments.py": """
+from payments.config import STRIPE_LIVE_KEY
+from payments.processor import process_payment
+import inspect
+
+def test_hardcoded_keys():
+    assert 'sk_live_' not in STRIPE_LIVE_KEY, "Security Error: Hardcoded live Stripe key found in config.py!"
+
+def test_performance():
+    source = inspect.getsource(process_payment)
+    assert 'asyncio.sleep' in source or 'time.sleep' not in source, "Performance Error: Synchronous blocking time.sleep() detected."
+"""
+        }
     }
 ]
 

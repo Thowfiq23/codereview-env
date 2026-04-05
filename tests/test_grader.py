@@ -1,56 +1,42 @@
 import sys
 import os
-import math
+# Tell Python to look in the parent directory for our modules
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Force Python to look in the root directory for our modules
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from models import AgentAction, ReviewComment
+from grader import evaluate_review
 
-from models import ReviewAction, ReviewComment
-from grader import evaluate_review, parse_agent_action, get_ast_blast_radius
+def test_grader_math():
+    repo = {"auth.py": "def login():\n    pass\n"}
+    gt = [{"file_path": "auth.py", "line_number": 2, "correct_severity": "high", "match_keywords": "login,bug"}]
 
-def test_parse_agent_action_unbreakable():
-    bad_json = "I am an AI. Here is the json: ```json {bad} ```"
-    action = parse_agent_action(bad_json)
-    assert action is None
+    print("\n--- RUNNING GRADER STRESS TESTS ---")
 
-def test_ast_blast_radius():
-    code = "def foo():\n    a = 1\n    b = 2\n\ndef bar():\n    pass\n"
-    start, end = get_ast_blast_radius(code, 2)
-    # The AST will bound either the line or the function. We just verify it bounds the target.
-    assert start <= 2 and end >= 2
+    # TEST 1: The Perfect, Efficient Agent (1 step)
+    action_perfect = AgentAction(action_type="submit_review", review_comments=[
+        ReviewComment(file_path="auth.py", line_number=2, issue_type="security", severity="high", description="Login bug found")
+    ])
+    score_1, info_1 = evaluate_review(action_perfect, repo, gt, step_count=1)
+    print(f"Test 1 (Perfect 1-Step): Score = {score_1:.2f}")
+    assert score_1 > 0.8, "Failed: Efficient agent didn't get bonus!"
 
-def test_evaluate_review_exact_match():
-    code = "def add(a, b): return a - b"
-    action = ReviewAction(
-        comments=[ReviewComment(line_number=1, issue_type="bug", severity="high", description="wrong math logic here")],
-        summary="bug found here"
-    )
-    # Added 'match_keywords' to satisfy your grader's fuzzy matching logic!
-    issues = [{
-        "line_number": 1, 
-        "correct_type": "bug", 
-        "correct_severity": "high", 
-        "description": "uses minus instead of plus",
-        "match_keywords": "math,minus,wrong"
-    }]
-    
-    reward, info = evaluate_review(action, code, issues)
-    assert reward > 0.0  # Proves the fuzzy matching and true positive detection works
+    # TEST 2: The Slow Agent (12 steps to find the exact same bug)
+    score_2, info_2 = evaluate_review(action_perfect, repo, gt, step_count=12)
+    print(f"Test 2 (Slow 12-Step): Score = {score_2:.2f}")
+    assert score_1 > score_2, "Failed: Slow agent wasn't penalized for inefficiency!"
 
-def test_evaluate_review_false_positive_penalty():
-    code = "def noop(): pass"
-    action = ReviewAction(
-        comments=[
-            # Descriptions MUST be >= 10 characters to pass your Pydantic validation!
-            ReviewComment(line_number=1, issue_type="style", severity="low", description="Bad style formatting"),
-            ReviewComment(line_number=1, issue_type="security", severity="critical", description="Fake bug hallucinated")
-        ],
-        summary="Found stuff."
-    )
-    issues = [] # No real bugs in the code
+    # TEST 3: The Hallucinating Agent (Found the bug, but guessed 3 fake ones)
+    action_hallucinate = AgentAction(action_type="submit_review", review_comments=[
+        ReviewComment(file_path="auth.py", line_number=2, issue_type="security", severity="high", description="Login bug found"),
+        ReviewComment(file_path="auth.py", line_number=99, issue_type="logic", severity="low", description="Fake bug 1"),
+        ReviewComment(file_path="auth.py", line_number=100, issue_type="logic", severity="low", description="Fake bug 2"),
+        ReviewComment(file_path="auth.py", line_number=101, issue_type="logic", severity="low", description="Fake bug 3")
+    ])
+    score_3, info_3 = evaluate_review(action_hallucinate, repo, gt, step_count=1)
+    print(f"Test 3 (Hallucinations): Score = {score_3:.2f}")
+    assert score_3 < score_1, "Failed: Hallucinations weren't penalized!"
 
-    reward, info = evaluate_review(action, code, issues)
-    
-    # Base score is 1.0 (no bugs missed). 2 False Positives = penalty of math.exp(-0.25 * 2)
-    expected_reward = math.exp(-0.5) 
-    assert math.isclose(reward, expected_reward, rel_tol=1e-5)
+    print("✅ ALL MATH TESTS PASSED! Grader is flawless.\n")
+
+if __name__ == "__main__":
+    test_grader_math()

@@ -1,8 +1,12 @@
+import os
 import uuid
+import subprocess
+import shutil
 from typing import Dict, Any, Tuple
 from models import AgentAction, CodeObservation, ReviewState
 from tasks import TASKS
-from grader import evaluate_review, parse_agent_action
+
+WORKSPACE_BASE = "/tmp/codereview_workspaces"
 
 class CodeReviewEnvironment:
     def __init__(self):
@@ -15,7 +19,22 @@ class CodeReviewEnvironment:
             done=False
         )
         self.current_task_data = None
-        self._is_first_reset = True  # Safe cycler flag
+        self._is_first_reset = True
+        self.workspace_dir = ""
+
+    def _setup_workspace(self):
+        """Physically writes the task files to the server's hard drive."""
+        self.workspace_dir = os.path.join(WORKSPACE_BASE, self.state.episode_id)
+        if os.path.exists(self.workspace_dir):
+            shutil.rmtree(self.workspace_dir)
+        os.makedirs(self.workspace_dir, exist_ok=True)
+        
+        repo = self.current_task_data["repository"]
+        for filepath, content in repo.items():
+            full_path = os.path.join(self.workspace_dir, filepath)
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            with open(full_path, "w") as f:
+                f.write(content)
 
     def reset(self) -> CodeObservation:
         self.state.episode_id = str(uuid.uuid4())
@@ -23,14 +42,15 @@ class CodeReviewEnvironment:
         self.state.done = False
         self.state.total_reward = 0.0
         
-        # Cycle through tasks cleanly
         if not self._is_first_reset:
             self.state.current_task_index = (self.state.current_task_index + 1) % len(TASKS)
         self._is_first_reset = False
         
-        # Load the task
         self.current_task_data = TASKS[self.state.current_task_index]
         self.state.task_id = self.current_task_data["task_id"]
+        
+        # Deploy the physical sandbox!
+        self._setup_workspace()
         
         available_files = list(self.current_task_data["repository"].keys())
         
@@ -38,50 +58,71 @@ class CodeReviewEnvironment:
             task_id=self.state.task_id,
             context=self.current_task_data["description"],
             available_files=available_files,
-            action_result="Environment reset. Please select a file to read or search the codebase.",
+            action_result=f"Sandbox deployed at {self.workspace_dir}. You have a real bash terminal. Run 'pytest tests/' to begin.",
             step_number=self.state.step_count,
             done=False,
             reward=0.0
         )
 
-    def step(self, action_text: str) -> Tuple[CodeObservation, float, bool, Dict[str, Any]]:
+    def step(self, action_obj: AgentAction) -> Tuple[CodeObservation, float, bool, Dict[str, Any]]:
         try:
-            if self.current_task_data is None:
-                raise ValueError("Environment not initialized. You must call /reset first.")
             if self.state.done:
                 raise ValueError("Episode is already done. Call reset().")
                 
             self.state.step_count += 1
-            repo = self.current_task_data["repository"]
-            available_files = list(repo.keys())
+            available_files = list(self.current_task_data["repository"].keys())
             
-            action = parse_agent_action(action_text)
-            if not action:
-                obs = CodeObservation(
-                    task_id=self.state.task_id, context=self.current_task_data["description"],
-                    available_files=available_files, action_result="Error: Invalid JSON format.",
-                    step_number=self.state.step_count, done=False, reward=0.0
-                )
-                return obs, 0.0, False, {"error": "Invalid action schema."}
-
             obs_result = ""
             reward = 0.0
             done = False
             info = {}
 
-            if action.action_type == "read_file":
-                target = action.target_file
-                obs_result = f"--- CONTENTS OF {target} ---\n{repo[target]}" if target in repo else f"Error: File '{target}' not found."
+            # --- TOOL 1: EXECUTE COMMAND (Real Linux Bash) ---
+            if action_obj.action_type == "execute_command":
+                cmd = action_obj.command
+                if not cmd:
+                    obs_result = "Error: No bash command provided."
+                else:
+                    # Run the command physically in the workspace directory
+                    result = subprocess.run(
+                        cmd, cwd=self.workspace_dir, shell=True, 
+                        capture_output=True, text=True, timeout=15
+                    )
+                    output = result.stdout if result.stdout else result.stderr
+                    obs_result = f"--- BASH OUTPUT (Exit Code {result.returncode}) ---\n{output}"
 
-            elif action.action_type == "search_code":
-                query = action.search_query or ""
-                matches = [f"{fname} (Line {i+1}): {line.strip()}" for fname, content in repo.items() for i, line in enumerate(content.split('\n')) if query.lower() in line.lower()]
-                obs_result = "--- SEARCH RESULTS ---\n" + "\n".join(matches) if matches else f"No matches found for '{query}'."
+            # --- TOOL 2: PATCH FILE (Physical Disk Write) ---
+            elif action_obj.action_type == "patch_file":
+                target = action_obj.target_file
+                new_content = action_obj.new_content
+                if not target or not new_content:
+                    obs_result = "Error: target_file and new_content required."
+                else:
+                    full_path = os.path.join(self.workspace_dir, target)
+                    if ".." in target:
+                        obs_result = "Security Error: Path traversal blocked."
+                    else:
+                        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+                        with open(full_path, "w") as f:
+                            f.write(new_content)
+                        obs_result = f"Successfully overwrote physical file: {target}"
 
-            elif action.action_type == "submit_review":
-                issues = self.current_task_data["ground_truth_issues"]
-                reward, info = evaluate_review(action, repo, issues, self.state.step_count)
-                obs_result = f"Review submitted. Feedback: {info.get('feedback', 'Processed.')}"
+            # --- TOOL 3: SUBMIT REVIEW (The Execution Grader) ---
+            elif action_obj.action_type == "submit_review":
+                # The ultimate test: We run pytest on their code!
+                result = subprocess.run(
+                    "pytest tests/", cwd=self.workspace_dir, shell=True, 
+                    capture_output=True, text=True, timeout=15
+                )
+                
+                if result.returncode == 0:
+                    reward = 1.0  # PERFECT SCORE! They actually fixed the app.
+                    feedback = "SUCCESS! All tests passed in the sandbox."
+                else:
+                    reward = 0.0  # Tests still failing.
+                    feedback = f"FAILED! Tests are still failing.\n{result.stdout[-500:]}"
+                    
+                obs_result = f"Evaluation complete. {feedback}"
                 done = True
                 self.state.total_reward += reward
 
@@ -94,7 +135,6 @@ class CodeReviewEnvironment:
             return obs, reward, done, info
             
         except Exception as e:
-            # Absolute guardrail: If anything fails, return a safe JSON instead of crashing FastAPI
             obs = CodeObservation(
                 task_id=self.state.task_id if self.current_task_data else "error",
                 context="Error state", available_files=[], action_result=f"Internal Env Error: {str(e)}",

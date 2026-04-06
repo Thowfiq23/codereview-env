@@ -171,10 +171,11 @@ def main():
         scores.append(run_task(env, i))
 
     avg = sum(scores) / len(scores) if scores else 0.0
+    # Print summary to stderr — stdout must contain only [START]/[STEP]/[END] per spec
     print(
         f"[SUMMARY] tasks=3 scores={','.join(f'{s:.2f}' for s in scores)} "
         f"average={avg:.2f}",
-        flush=True
+        file=__import__('sys').stderr, flush=True
     )
 
 

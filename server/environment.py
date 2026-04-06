@@ -119,6 +119,19 @@ class CodeReviewEnvironment:
         return p / (p + f) if (p + f) > 0 else 0.0
 
     def step(self, action_obj: AgentAction) -> Tuple[CodeObservation, float, bool, Dict[str, Any]]:
+        # Guard: /reset must be called before the first /step
+        if self.current_task_data is None:
+            obs = CodeObservation(
+                task_id="none",
+                context="No active episode.",
+                available_files=[],
+                action_result="Call POST /reset before calling /step.",
+                step_number=0,
+                done=False,
+                reward=0.0
+            )
+            return obs, 0.0, False, {"error": "no_active_episode_call_reset_first"}
+
         # If episode already ended, return a clean terminal observation — do not raise
         if self.state.done:
             obs = CodeObservation(

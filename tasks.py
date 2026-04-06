@@ -54,7 +54,7 @@ from payments.processor import process_payment
 import inspect
 
 def test_hardcoded_keys():
-    assert 'sk_live_' not in STRIPE_LIVE_KEY, "Security Error: Hardcoded live Stripe key found in config.py!"
+    assert not STRIPE_LIVE_KEY or 'sk_live_' not in STRIPE_LIVE_KEY, "Security Error: Hardcoded live Stripe key found in config.py!"
 
 def test_performance():
     source = inspect.getsource(process_payment)

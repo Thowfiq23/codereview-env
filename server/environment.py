@@ -2,6 +2,7 @@ import os
 import uuid
 import subprocess
 import shutil
+from subprocess import TimeoutExpired
 from typing import Dict, Any, Tuple
 
 from models import AgentAction, CodeObservation, ReviewState
@@ -70,26 +71,30 @@ class CodeReviewEnvironment:
 
     def _get_test_pass_rate(self) -> float:
         """Silently runs pytest and returns a fractional pass rate for partial credit."""
+        import re
         run_env = os.environ.copy()
         run_env["PYTHONPATH"] = self.workspace_dir
         result = subprocess.run(
-            "pytest tests/ --disable-warnings -q",
+            "pytest tests/ --disable-warnings -v",
             cwd=self.workspace_dir, shell=True,
-            capture_output=True, text=True, timeout=30, env=run_env
+            capture_output=True, text=True, timeout=15, env=run_env
         )
         if result.returncode == 0:
             return 1.0
 
         output = result.stdout + result.stderr
-        passed = output.count(" passed")
-        # Count individual test lines for more accuracy
-        n_passed = sum(1 for line in output.splitlines() if line.strip().startswith("PASSED"))
-        n_failed = sum(1 for line in output.splitlines() if line.strip().startswith("FAILED"))
-        n_error = sum(1 for line in output.splitlines() if line.strip().startswith("ERROR"))
-        total = n_passed + n_failed + n_error
+        # -v mode emits "PASSED" / "FAILED" / "ERROR" at the start of each test line
+        n_passed = sum(1 for line in output.splitlines() if " PASSED" in line)
+        n_failed = sum(1 for line in output.splitlines() if " FAILED" in line or " ERROR" in line)
+        total = n_passed + n_failed
         if total > 0:
             return n_passed / total
-        return 0.0
+        # Fallback: parse the summary line e.g. "1 failed, 1 passed in 0.12s"
+        m_pass = re.search(r"(\d+) passed", output)
+        m_fail = re.search(r"(\d+) failed", output)
+        p = int(m_pass.group(1)) if m_pass else 0
+        f = int(m_fail.group(1)) if m_fail else 0
+        return p / (p + f) if (p + f) > 0 else 0.0
 
     def step(self, action_obj: AgentAction) -> Tuple[CodeObservation, float, bool, Dict[str, Any]]:
         try:
@@ -113,12 +118,15 @@ class CodeReviewEnvironment:
                 if not cmd:
                     obs_result = "Error: No bash command provided."
                 else:
-                    result = subprocess.run(
-                        cmd, cwd=self.workspace_dir, shell=True,
-                        capture_output=True, text=True, timeout=30, env=run_env
-                    )
-                    output = result.stdout if result.stdout else result.stderr
-                    obs_result = f"--- BASH OUTPUT (Exit Code {result.returncode}) ---\n{output}"
+                    try:
+                        result = subprocess.run(
+                            cmd, cwd=self.workspace_dir, shell=True,
+                            capture_output=True, text=True, timeout=15, env=run_env
+                        )
+                        output = result.stdout if result.stdout else result.stderr
+                        obs_result = f"--- BASH OUTPUT (Exit Code {result.returncode}) ---\n{output}"
+                    except TimeoutExpired:
+                        obs_result = "Error: Command timed out after 15 seconds. Avoid long-running commands."
 
             # --- TOOL 2: PATCH FILE (Physical Disk Write + Partial Reward) ---
             elif action_obj.action_type == "patch_file":
@@ -142,7 +150,7 @@ class CodeReviewEnvironment:
                 result = subprocess.run(
                     "pytest tests/ -v",
                     cwd=self.workspace_dir, shell=True,
-                    capture_output=True, text=True, timeout=30, env=run_env
+                    capture_output=True, text=True, timeout=15, env=run_env
                 )
                 if result.returncode == 0:
                     reward = 1.0

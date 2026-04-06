@@ -71,10 +71,21 @@ def extract_json(text: str) -> str:
     return text.strip()
 
 
-def run_task(env: CodeReviewEnv) -> float:
-    """Run one full episode. Emits [START]/[STEP]/[END] lines to stdout."""
-    obs = env.reset()
-    task_name = obs.task_id
+def run_task(env: CodeReviewEnv, task_index: int) -> float:
+    """Run one full episode. Always emits [START]/[STEP]/[END] lines to stdout."""
+    rewards = []
+    step = 0
+    score = 0.0
+    task_name = f"task_{task_index + 1}_pr"
+
+    try:
+        obs = env.reset()
+        task_name = obs.task_id
+    except Exception as exc:
+        print(f"[START] task={task_name} env={BENCHMARK} model={MODEL_NAME}", flush=True)
+        print(f"[STEP] step=1 action=null reward=0.00 done=false error=env_reset_failed:{exc}", flush=True)
+        print(f"[END] success=false steps=1 score=0.00 rewards=0.00", flush=True)
+        return 0.0
 
     print(f"[START] task={task_name} env={BENCHMARK} model={MODEL_NAME}", flush=True)
 
@@ -90,10 +101,7 @@ def run_task(env: CodeReviewEnv) -> float:
         }
     ]
 
-    rewards = []
     done = False
-    step = 0
-    score = 0.0
 
     try:
         while not done and step < MAX_STEPS:
@@ -159,8 +167,8 @@ def run_task(env: CodeReviewEnv) -> float:
 def main():
     env = CodeReviewEnv(base_url=ENV_URL)
     scores = []
-    for _ in range(3):
-        scores.append(run_task(env))
+    for i in range(3):
+        scores.append(run_task(env, i))
 
 
 if __name__ == "__main__":

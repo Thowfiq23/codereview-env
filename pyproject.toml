@@ -5,7 +5,7 @@ build-backend = "setuptools.backends.legacy:build"
 [project]
 name = "codereview-env"
 version = "1.0.0"
-description = "OpenEnv environment for AI-driven pull-request code review"
+description = "OpenEnv environment for autonomous SWE bug-fixing"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -16,21 +16,17 @@ dependencies = [
     "pydantic>=2.0.0",
     "openai>=1.0.0",
     "requests>=2.28.0",
-    "python-multipart>=0.0.6",
-    "thefuzz>=0.19.0",
-    "python-levenshtein>=0.20.0",
-    "anyio>=3.6.0",
+    "pytest>=7.0.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=7.0",
     "httpx>=0.24.0",
 ]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["codereview_env*"]
+include = ["server*"]
 
 [project.scripts]
 server = "server.app:main"

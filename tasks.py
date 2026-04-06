@@ -14,7 +14,7 @@ import inspect
 
 def test_sql_injection_fixed():
     query = get_user_query('admin')
-    assert '%s' in query or '?' in query, "Security Error: Code is still vulnerable to SQL Injection (use %s or ?)"
+    assert '%s' in str(query) or '?' in str(query), "Security Error: Code is still vulnerable to SQL Injection (use %s or ?)"
 
 def test_crypto_fixed():
     source = inspect.getsource(hash_password)

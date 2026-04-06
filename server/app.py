@@ -19,6 +19,10 @@ env = CodeReviewEnvironment()
 async def health_check() -> Dict[str, str]:
     return {"status": "ok"}
 
+@app.get("/tasks")
+async def get_tasks() -> Dict[str, list]:
+    return {"tasks": list_task_ids()}
+
 @app.post("/reset", response_model=CodeObservation)
 async def reset_env() -> CodeObservation:
     return env.reset()
@@ -28,14 +32,11 @@ async def step_env(request: Request):
     raw_text = (await request.body()).decode("utf-8")
     
     try:
-        # Parse the incoming JSON into our strict Pydantic God Mode Action
         action_dict = json.loads(raw_text)
         action_obj = AgentAction.model_validate(action_dict)
     except Exception as e:
-        # Fallback if the AI sends total garbage JSON
         action_obj = AgentAction(action_type="execute_command", command=f"echo 'Invalid JSON: {e}'")
         
-    # Pass the validated object to the physical sandbox
     obs, reward, done, info = env.step(action_obj)
     
     return {

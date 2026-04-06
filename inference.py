@@ -170,6 +170,13 @@ def main():
     for i in range(3):
         scores.append(run_task(env, i))
 
+    avg = sum(scores) / len(scores) if scores else 0.0
+    print(
+        f"[SUMMARY] tasks=3 scores={','.join(f'{s:.2f}' for s in scores)} "
+        f"average={avg:.2f}",
+        flush=True
+    )
+
 
 if __name__ == "__main__":
     main()

@@ -1,4 +1,5 @@
 import os
+import re
 import uuid
 import subprocess
 import shutil
@@ -9,6 +10,21 @@ from models import AgentAction, CodeObservation, ReviewState
 from tasks import TASKS
 
 WORKSPACE_BASE = "/tmp/codereview_workspaces"
+MAX_STEPS = 10
+
+# Minimal clean environment passed to all subprocesses.
+# Deliberately excludes server credentials (HF_TOKEN, API keys, etc.)
+_CLEAN_ENV_KEYS = {"PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "USER", "LOGNAME"}
+
+
+def _make_clean_env(pythonpath: str) -> Dict[str, str]:
+    """Return a minimal subprocess environment — no server credentials leaked."""
+    clean = {k: v for k, v in os.environ.items() if k in _CLEAN_ENV_KEYS}
+    clean["PYTHONPATH"] = pythonpath
+    # Ensure python/pytest are findable even in minimal PATH
+    if "PATH" not in clean:
+        clean["PATH"] = "/usr/local/bin:/usr/bin:/bin"
+    return clean
 
 
 class CodeReviewEnvironment:
@@ -26,10 +42,12 @@ class CodeReviewEnvironment:
         self.workspace_dir = ""
 
     def _setup_workspace(self):
-        """Physically writes the task files to a fresh isolated directory on disk."""
+        """Create a fresh isolated workspace for this episode, cleaning up the old one."""
+        # Clean up previous workspace to prevent disk fill
+        if self.workspace_dir and os.path.exists(self.workspace_dir):
+            shutil.rmtree(self.workspace_dir, ignore_errors=True)
+
         self.workspace_dir = os.path.join(WORKSPACE_BASE, self.state.episode_id)
-        if os.path.exists(self.workspace_dir):
-            shutil.rmtree(self.workspace_dir)
         os.makedirs(self.workspace_dir, exist_ok=True)
 
         repo = self.current_task_data["repository"]
@@ -38,6 +56,11 @@ class CodeReviewEnvironment:
             os.makedirs(os.path.dirname(full_path), exist_ok=True)
             with open(full_path, "w") as f:
                 f.write(content)
+
+    def cleanup(self):
+        """Explicitly remove the current workspace. Called on server shutdown."""
+        if self.workspace_dir and os.path.exists(self.workspace_dir):
+            shutil.rmtree(self.workspace_dir, ignore_errors=True)
 
     def reset(self) -> CodeObservation:
         self.state.episode_id = str(uuid.uuid4())
@@ -60,36 +83,35 @@ class CodeReviewEnvironment:
             task_id=self.state.task_id,
             context=self.current_task_data["description"],
             available_files=available_files,
-            action_result=(
-                f"Sandbox ready at {self.workspace_dir}. "
-                "Run 'pytest tests/' to see what is failing."
-            ),
+            action_result="Sandbox ready. Run 'pytest tests/' to see what is failing.",
             step_number=self.state.step_count,
             done=False,
             reward=0.0
         )
 
     def _get_test_pass_rate(self) -> float:
-        """Silently runs pytest and returns a fractional pass rate for partial credit."""
-        import re
-        run_env = os.environ.copy()
-        run_env["PYTHONPATH"] = self.workspace_dir
-        result = subprocess.run(
-            "pytest tests/ --disable-warnings -v",
-            cwd=self.workspace_dir, shell=True,
-            capture_output=True, text=True, timeout=15, env=run_env
-        )
+        """Run pytest silently and return the fraction of tests passing (0.0–1.0)."""
+        env = _make_clean_env(self.workspace_dir)
+        try:
+            result = subprocess.run(
+                "pytest tests/ --disable-warnings -v",
+                cwd=self.workspace_dir, shell=True,
+                capture_output=True, text=True, timeout=15, env=env
+            )
+        except TimeoutExpired:
+            return 0.0
+
         if result.returncode == 0:
             return 1.0
 
         output = result.stdout + result.stderr
-        # -v mode emits "PASSED" / "FAILED" / "ERROR" at the start of each test line
         n_passed = sum(1 for line in output.splitlines() if " PASSED" in line)
         n_failed = sum(1 for line in output.splitlines() if " FAILED" in line or " ERROR" in line)
         total = n_passed + n_failed
         if total > 0:
             return n_passed / total
-        # Fallback: parse the summary line e.g. "1 failed, 1 passed in 0.12s"
+
+        # Fallback: parse summary line e.g. "1 failed, 1 passed in 0.12s"
         m_pass = re.search(r"(\d+) passed", output)
         m_fail = re.search(r"(\d+) failed", output)
         p = int(m_pass.group(1)) if m_pass else 0
@@ -97,10 +119,20 @@ class CodeReviewEnvironment:
         return p / (p + f) if (p + f) > 0 else 0.0
 
     def step(self, action_obj: AgentAction) -> Tuple[CodeObservation, float, bool, Dict[str, Any]]:
-        try:
-            if self.state.done:
-                raise ValueError("Episode is already done. Call reset().")
+        # If episode already ended, return a clean terminal observation — do not raise
+        if self.state.done:
+            obs = CodeObservation(
+                task_id=self.state.task_id,
+                context=self.current_task_data["description"] if self.current_task_data else "",
+                available_files=list(self.current_task_data["repository"].keys()) if self.current_task_data else [],
+                action_result="Episode is already done. Call /reset to start a new episode.",
+                step_number=self.state.step_count,
+                done=True,
+                reward=0.0
+            )
+            return obs, 0.0, True, {"error": "episode_already_done"}
 
+        try:
             self.state.step_count += 1
             available_files = list(self.current_task_data["repository"].keys())
 
@@ -109,8 +141,7 @@ class CodeReviewEnvironment:
             done = False
             info = {}
 
-            run_env = os.environ.copy()
-            run_env["PYTHONPATH"] = self.workspace_dir
+            env = _make_clean_env(self.workspace_dir)
 
             # --- TOOL 1: EXECUTE COMMAND (Real Bash Terminal) ---
             if action_obj.action_type == "execute_command":
@@ -121,14 +152,14 @@ class CodeReviewEnvironment:
                     try:
                         result = subprocess.run(
                             cmd, cwd=self.workspace_dir, shell=True,
-                            capture_output=True, text=True, timeout=15, env=run_env
+                            capture_output=True, text=True, timeout=15, env=env
                         )
                         output = result.stdout if result.stdout else result.stderr
                         obs_result = f"--- BASH OUTPUT (Exit Code {result.returncode}) ---\n{output}"
                     except TimeoutExpired:
-                        obs_result = "Error: Command timed out after 15 seconds. Avoid long-running commands."
+                        obs_result = "Error: Command timed out after 15 seconds. Avoid long-running or interactive commands."
 
-            # --- TOOL 2: PATCH FILE (Physical Disk Write + Partial Reward) ---
+            # --- TOOL 2: PATCH FILE (Physical Disk Write + Dense Partial Reward) ---
             elif action_obj.action_type == "patch_file":
                 target = action_obj.target_file
                 new_content = action_obj.new_content
@@ -142,27 +173,42 @@ class CodeReviewEnvironment:
                     with open(full_path, "w") as f:
                         f.write(new_content)
                     obs_result = f"Successfully patched: {target}"
-                    # Partial reward: up to 0.9 based on tests now passing (submit gets 1.0)
+                    # Dense reward: 0.0–0.9 based on test pass rate after the patch
                     reward = round(self._get_test_pass_rate() * 0.9, 4)
+                    # Accumulate to total_reward so state() reflects trajectory progress
+                    self.state.total_reward = round(
+                        max(self.state.total_reward, reward), 4
+                    )
 
-            # --- TOOL 3: SUBMIT REVIEW (Final Grader) ---
+            # --- TOOL 3: SUBMIT REVIEW (Final Execution Grader) ---
             elif action_obj.action_type == "submit_review":
-                result = subprocess.run(
-                    "pytest tests/ -v",
-                    cwd=self.workspace_dir, shell=True,
-                    capture_output=True, text=True, timeout=15, env=run_env
-                )
-                if result.returncode == 0:
-                    reward = 1.0
-                    feedback = "SUCCESS! All tests passed."
-                else:
-                    reward = self._get_test_pass_rate()
-                    feedback = f"FAILED. Tests still failing.\n{result.stdout[-500:]}"
+                try:
+                    result = subprocess.run(
+                        "pytest tests/ -v",
+                        cwd=self.workspace_dir, shell=True,
+                        capture_output=True, text=True, timeout=15, env=env
+                    )
+                    if result.returncode == 0:
+                        reward = 1.0
+                        feedback = "SUCCESS: All tests passed."
+                    else:
+                        reward = self._get_test_pass_rate()
+                        feedback = f"FAILED: Tests still failing.\n{result.stdout[-500:]}"
+                except TimeoutExpired:
+                    reward = 0.0
+                    feedback = "FAILED: Test suite timed out."
 
                 obs_result = f"Evaluation complete. {feedback}"
                 done = True
-                self.state.total_reward += reward
+                self.state.total_reward = max(self.state.total_reward, reward)
                 info["feedback"] = feedback
+                # Cleanup workspace after episode ends
+                shutil.rmtree(self.workspace_dir, ignore_errors=True)
+
+            # Server-side max_steps cutoff — prevents runaway episodes
+            if self.state.step_count >= MAX_STEPS and not done:
+                done = True
+                obs_result += f"\n[System] Max steps ({MAX_STEPS}) reached. Episode terminated."
 
             obs = CodeObservation(
                 task_id=self.state.task_id,

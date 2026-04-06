@@ -32,6 +32,15 @@ class ReviewState(BaseModel):
     total_reward: float
     done: bool
 
+class EpisodeReward(BaseModel):
+    """Typed reward model as required by OpenEnv spec."""
+    value: float = Field(..., ge=0.0, le=1.0, description="Scalar reward for this step [0.0, 1.0]")
+    is_terminal: bool = Field(False, description="True if this reward ends the episode")
+    breakdown: Dict[str, float] = Field(
+        default_factory=dict,
+        description="Optional per-component breakdown (e.g. test_pass_rate, penalty)"
+    )
+
 class StepResponse(BaseModel):
     observation: CodeObservation
     reward: float

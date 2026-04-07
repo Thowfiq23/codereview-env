@@ -10,10 +10,10 @@ Required env vars:
   OPENAI_API_KEY  - OpenAI-compatible API key (fallback if HF_TOKEN not set)
   ENV_URL         - Environment server URL (default: http://localhost:7860)
 
-Stdout format (mandatory):
+Stdout format (mandatory — exact OpenEnv spec):
   [START] task=<name> env=<benchmark> model=<model>
   [STEP]  step=<n> action=<json> reward=<0.00> done=<true|false> error=<msg|null>
-  [END]   success=<true|false> steps=<n> score=<0.00> rewards=<r1,r2,...>
+  [END]   success=<true|false> steps=<n> rewards=<r1,r2,...>
 """
 
 import os
@@ -46,7 +46,10 @@ from models import AgentAction
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME   = os.getenv("MODEL_NAME", "meta-llama/Llama-3.3-70B-Instruct")
 # Support both HF_TOKEN (primary) and OPENAI_API_KEY (spec fallback)
-API_KEY      = os.getenv("HF_TOKEN") or os.getenv("OPENAI_API_KEY")
+HF_TOKEN     = os.getenv("HF_TOKEN")
+if HF_TOKEN is None:
+    raise ValueError("HF_TOKEN environment variable is required")
+API_KEY      = HF_TOKEN
 ENV_URL      = os.getenv("ENV_URL", "http://localhost:7860")
 BENCHMARK    = "codereview-env"
 MAX_STEPS    = 10
@@ -104,7 +107,7 @@ def run_task(env: CodeReviewEnv, task_index: int) -> float:
     except Exception as exc:
         print(f"[START] task={task_name} env={BENCHMARK} model={MODEL_NAME}", flush=True)
         print(f"[STEP] step=1 action=null reward=0.00 done=false error=env_reset_failed:{exc}", flush=True)
-        print(f"[END] success=false steps=1 score=0.00 rewards=0.00", flush=True)
+        print(f"[END] success=false steps=1 rewards=0.00", flush=True)
         return 0.0
 
     print(f"[START] task={task_name} env={BENCHMARK} model={MODEL_NAME}", flush=True)
@@ -216,9 +219,10 @@ def run_task(env: CodeReviewEnv, task_index: int) -> float:
     success = score >= 0.5
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
 
+    # [END] format follows the OpenEnv spec exactly:
+    # success steps rewards  — no extra fields (evaluator regex-parses this line)
     print(
-        f"[END] success={str(success).lower()} steps={step} "
-        f"score={score:.2f} rewards={rewards_str}",
+        f"[END] success={str(success).lower()} steps={step} rewards={rewards_str}",
         flush=True
     )
 

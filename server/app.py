@@ -1,3 +1,4 @@
+import asyncio
 import json
 from contextlib import asynccontextmanager
 from typing import Any, Dict
@@ -24,6 +25,9 @@ app = FastAPI(
 )
 
 env = CodeReviewEnvironment()
+# Serialize all mutating env calls so concurrent evaluator requests
+# cannot interleave reset/step and corrupt episode state.
+_env_lock = asyncio.Lock()
 
 
 @app.get("/health")
@@ -123,7 +127,8 @@ async def get_tasks() -> Dict[str, list]:
 
 @app.post("/reset", response_model=CodeObservation)
 async def reset_env() -> CodeObservation:
-    return env.reset()
+    async with _env_lock:
+        return env.reset()
 
 
 @app.post("/step")
@@ -140,7 +145,8 @@ async def step_env(request: Request) -> Dict[str, Any]:
             command=f"echo 'Parse error — send valid JSON: {str(e)[:120]}'"
         )
 
-    obs, reward, done, info = env.step(action_obj)
+    async with _env_lock:
+        obs, reward, done, info = env.step(action_obj)
 
     # Include typed EpisodeReward in the response to satisfy OpenEnv spec
     typed_reward = EpisodeReward(

@@ -20,6 +20,7 @@ import os
 import sys
 import json
 import logging
+import time
 
 # Suppress httpx/httpcore/openai INFO logs — they can emit to stdout and
 # break the strict [START]/[STEP]/[END] format the evaluator regex-parses.
@@ -134,13 +135,33 @@ def run_task(env: CodeReviewEnv, task_index: int) -> float:
             assistant_appended = False
 
             try:
-                response = client.chat.completions.create(
-                    model=MODEL_NAME,
-                    messages=messages,
-                    temperature=TEMPERATURE,
-                    max_tokens=2048,
-                    stream=False,
-                )
+                # Retry up to 3 times on rate-limit / quota errors (HTTP 429)
+                # with exponential backoff so the episode isn't wasted on a
+                # transient API throttle.
+                _last_api_exc = None
+                response = None
+                for _attempt in range(3):
+                    try:
+                        response = client.chat.completions.create(
+                            model=MODEL_NAME,
+                            messages=messages,
+                            temperature=TEMPERATURE,
+                            max_tokens=2048,
+                            stream=False,
+                        )
+                        break
+                    except Exception as _api_exc:
+                        _last_api_exc = _api_exc
+                        _msg = str(_api_exc).lower()
+                        # Only retry on rate-limit / quota / server-overload signals
+                        if any(tok in _msg for tok in ("429", "rate limit", "quota", "too many", "overloaded")):
+                            if _attempt < 2:
+                                time.sleep(2 ** _attempt)  # 1s, 2s
+                                continue
+                        raise  # Non-retryable — propagate immediately
+                if response is None:
+                    raise _last_api_exc
+
                 raw = (response.choices[0].message.content or "").strip()
                 clean = extract_json(raw)
 

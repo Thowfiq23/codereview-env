@@ -296,6 +296,11 @@ class CodeReviewEnvironment:
                 # Clean up workspace — don't wait for the next reset()
                 shutil.rmtree(self.workspace_dir, ignore_errors=True)
 
+            # Commit the done flag to state BEFORE building the observation so
+            # that any exception thrown inside CodeObservation() or below is
+            # caught by the except block with the correct terminal state.
+            self.state.done = done
+
             obs = CodeObservation(
                 task_id=self.state.task_id,
                 context=self.current_task_data["description"],
@@ -305,18 +310,19 @@ class CodeReviewEnvironment:
                 done=done,
                 reward=reward
             )
-            self.state.done = done
             return obs, reward, done, info
 
         except Exception as e:
-            # Use self.state.done as the authoritative source.  If an exception
-            # fires after submit_review already set state.done=True and deleted
-            # the workspace, returning done=False would leave the caller unable
-            # to know the episode is over.  Also clean up the workspace if the
-            # episode is done (it may not have been removed yet).
+            # self.state.done is authoritative — it is updated before obs
+            # construction so this always reflects the correct terminal state
+            # even when the exception fires mid-obs-build.
             current_done = self.state.done
-            if current_done and self.workspace_dir and os.path.exists(self.workspace_dir):
-                shutil.rmtree(self.workspace_dir, ignore_errors=True)
+            if self.workspace_dir and os.path.exists(self.workspace_dir):
+                # Always clean up on any exception when the episode is done.
+                # When not done the workspace must survive for the next step,
+                # so only remove it if the episode has truly ended.
+                if current_done:
+                    shutil.rmtree(self.workspace_dir, ignore_errors=True)
             obs = CodeObservation(
                 task_id=self.state.task_id if self.current_task_data else "error",
                 context="Error state",

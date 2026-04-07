@@ -4,10 +4,11 @@ CodeReview-Env Inference Script
 Runs an LLM agent against all 3 tasks in the CodeReview-Env sandbox.
 
 Required env vars:
-  API_BASE_URL  - LLM API endpoint (default: HF Router)
-  MODEL_NAME    - Model identifier
-  HF_TOKEN      - API key
-  ENV_URL       - Environment server URL (default: http://localhost:7860)
+  API_BASE_URL    - LLM API endpoint (default: HF Router)
+  MODEL_NAME      - Model identifier
+  HF_TOKEN        - Hugging Face API key (primary)
+  OPENAI_API_KEY  - OpenAI-compatible API key (fallback if HF_TOKEN not set)
+  ENV_URL         - Environment server URL (default: http://localhost:7860)
 
 Stdout format (mandatory):
   [START] task=<name> env=<benchmark> model=<model>
@@ -43,7 +44,8 @@ from models import AgentAction
 # ---------------------------------------------------------------------------
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME   = os.getenv("MODEL_NAME", "meta-llama/Llama-3.3-70B-Instruct")
-API_KEY      = os.getenv("HF_TOKEN")
+# Support both HF_TOKEN (primary) and OPENAI_API_KEY (spec fallback)
+API_KEY      = os.getenv("HF_TOKEN") or os.getenv("OPENAI_API_KEY")
 ENV_URL      = os.getenv("ENV_URL", "http://localhost:7860")
 BENCHMARK    = "codereview-env"
 MAX_STEPS    = 10

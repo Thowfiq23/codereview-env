@@ -188,7 +188,11 @@ class CodeReviewEnvironment:
                     try:
                         result = subprocess.run(
                             cmd, cwd=self.workspace_dir, shell=True,
-                            capture_output=True, text=True, timeout=15, env=env
+                            capture_output=True, text=True, timeout=15, env=env,
+                            # New session isolates the child's process group so
+                            # signals sent inside the sandbox (e.g. kill -9 -1)
+                            # cannot escape to kill the FastAPI server process.
+                            start_new_session=True,
                         )
                         output = result.stdout if result.stdout else result.stderr
                         # Truncate to prevent context-window exhaustion on the LLM side.
@@ -212,30 +216,53 @@ class CodeReviewEnvironment:
                 new_content = action_obj.new_content
                 if not target or not new_content:
                     obs_result = "Error: target_file and new_content are required."
-                elif target.startswith("tests/") or target == "tests":
-                    # Test files are read-only graders — modifying them would
-                    # let an agent earn 1.0 by replacing the assertions with pass.
-                    obs_result = "Security Error: Test files are read-only and cannot be modified by the agent."
                 else:
-                    # Resolve the real path and verify it stays inside the workspace.
-                    # This blocks both ".." traversal and absolute paths like /etc/passwd.
+                    # Resolve both the target path and the tests directory to their
+                    # canonical real paths. String-prefix checks (target.startswith)
+                    # are bypassable via traversal like "auth/../tests/test_auth.py".
                     workspace_real = os.path.realpath(self.workspace_dir)
                     full_path = os.path.realpath(
                         os.path.join(self.workspace_dir, target)
                     )
+                    tests_real = os.path.realpath(
+                        os.path.join(self.workspace_dir, "tests")
+                    )
+
                     if not full_path.startswith(workspace_real + os.sep):
                         obs_result = "Security Error: Path traversal detected and blocked."
+                    elif full_path.startswith(tests_real + os.sep) or full_path == tests_real:
+                        # Block writes to the tests/ directory regardless of how the
+                        # path was constructed (direct or via traversal).
+                        obs_result = "Security Error: Test files are read-only and cannot be modified by the agent."
                     else:
                         os.makedirs(os.path.dirname(full_path), exist_ok=True)
-                        with open(full_path, "w") as f:
-                            f.write(new_content)
-                        obs_result = f"Successfully patched: {target}"
-                        # Dense reward: 0.0–0.9 based on test pass rate after the patch
-                        reward = round(self._get_test_pass_rate() * 0.9, 4)
-                        # Accumulate to total_reward so state() reflects trajectory progress
-                        self.state.total_reward = round(
-                            max(self.state.total_reward, reward), 4
-                        )
+                        # Quick syntax check before committing the file — gives the
+                        # agent immediate feedback instead of a cryptic reward=0.0.
+                        import py_compile, tempfile
+                        if full_path.endswith(".py"):
+                            try:
+                                with tempfile.NamedTemporaryFile(
+                                    mode="w", suffix=".py", delete=False
+                                ) as tmp:
+                                    tmp.write(new_content)
+                                    tmp_path = tmp.name
+                                py_compile.compile(tmp_path, doraise=True)
+                                os.unlink(tmp_path)
+                            except py_compile.PyCompileError as e:
+                                os.unlink(tmp_path)
+                                obs_result = f"Syntax Error in patch: {e}. File was NOT written. Fix the syntax and try again."
+                                # Skip the rest — don't write a broken file
+                                full_path = None
+                        if full_path is not None and not obs_result:
+                            with open(full_path, "w") as f:
+                                f.write(new_content)
+                            obs_result = f"Successfully patched: {target}"
+                            # Dense reward: 0.0–0.9 based on test pass rate after the patch
+                            reward = round(self._get_test_pass_rate() * 0.9, 4)
+                            # Accumulate to total_reward so state() reflects trajectory progress
+                            self.state.total_reward = round(
+                                max(self.state.total_reward, reward), 4
+                            )
 
             # --- TOOL 3: SUBMIT REVIEW (Final Execution Grader) ---
             elif action_obj.action_type == "submit_review":

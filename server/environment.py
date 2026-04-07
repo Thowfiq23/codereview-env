@@ -41,6 +41,13 @@ def _make_clean_env(pythonpath: str) -> Dict[str, str]:
 
 class CodeReviewEnvironment:
     def __init__(self):
+        # Purge any workspace directories left over from a previous server run
+        # (orphaned UUID dirs in /tmp/codereview_workspaces/ that the new
+        # instance knows nothing about).
+        if os.path.isdir(WORKSPACE_BASE):
+            shutil.rmtree(WORKSPACE_BASE, ignore_errors=True)
+        os.makedirs(WORKSPACE_BASE, exist_ok=True)
+
         self.state = ReviewState(
             episode_id=str(uuid.uuid4()),
             task_id="",
@@ -240,6 +247,8 @@ class CodeReviewEnvironment:
             if self.state.step_count >= MAX_STEPS and not done:
                 done = True
                 obs_result += f"\n[System] Max steps ({MAX_STEPS}) reached. Episode terminated."
+                # Clean up workspace — don't wait for the next reset()
+                shutil.rmtree(self.workspace_dir, ignore_errors=True)
 
             obs = CodeObservation(
                 task_id=self.state.task_id,

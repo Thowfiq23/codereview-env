@@ -58,7 +58,7 @@ def test_hardcoded_keys():
 
 def test_performance():
     source = inspect.getsource(process_payment)
-    assert 'asyncio.sleep' in source or 'time.sleep' not in source, "Performance Error: Synchronous blocking time.sleep() detected."
+    assert 'async def' in source and 'asyncio.sleep' in source, "Performance Error: process_payment must be async def and use asyncio.sleep."
 """
         }
     }

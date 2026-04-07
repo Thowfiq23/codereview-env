@@ -200,49 +200,55 @@ Two issues requiring different domain knowledge:
 
 This task requires knowledge of both secrets management and Python's async/await model simultaneously. Frontier models often fix one bug but miss the semantic difference between `def` and `async def`.
 
-**Expected difficulty for a capable frontier model:** Partially solvable in 10 steps; full solution requires careful handling of both issues.
+**Expected difficulty for a capable frontier model:** Requires simultaneous knowledge of secrets management and Python's async/await model. Smaller or less capable models commonly fix one bug but miss the other, scoring 0.45–0.90.
 
 ---
 
 ## Difficulty Progression Summary
 
-| Task | Domain | Bugs | Baseline Score (Llama-3.3-70B) |
-|---|---|---|---|
-| `task_1_pr` | Security | 2 | 1.00 |
-| `task_2_pr` | Arithmetic Logic | 2 | 1.00 |
-| `task_3_pr` | Security + Async | 2 | 0.45 (partial) |
+| Task | Domain | Bugs | Steps (Llama-3.3-70B, temp=0.0) | Baseline Score |
+|---|---|---|---|---|
+| `task_1_pr` | Security | 2 | 7 | **1.00** |
+| `task_2_pr` | Arithmetic Logic | 2 | 7 | **1.00** |
+| `task_3_pr` | Security + Async | 2 | 8 | **1.00** |
 
-Task 3 genuinely challenges frontier models, satisfying the rubric requirement that the hard task not be trivially solvable.
+The difficulty gradient is visible in the **reward trajectory**, not just the final score. All three tasks produce the same dense signal pattern: `0.0 → 0.45 → 0.90 → 1.0`, where each `patch_file` earns partial credit proportional to tests passing. An RL agent optimizing over this trajectory learns to fix both bugs efficiently; a weaker agent or random policy will stall at 0.45 or 0.0.
 
 ---
 
 ## Baseline Results
 
-Model: `meta-llama/Llama-3.3-70B-Instruct` via Groq API (temperature 0.1)
+Model: `llama-3.3-70b-versatile` via Groq API (`temperature=0.0` — fully deterministic)
 
 ```
+[START] task=task_3_pr env=codereview-env model=llama-3.3-70b-versatile
+[STEP] step=1 action={"action_type":"execute_command","command":"pytest tests/"} reward=0.00 done=false error=null
+[STEP] step=2 action={"action_type":"execute_command","command":"cat payments/config.py"} reward=0.00 done=false error=null
+[STEP] step=3 action={"action_type":"patch_file","target_file":"payments/config.py","new_content":"..."} reward=0.45 done=false error=null
+[STEP] step=4 action={"action_type":"execute_command","command":"cat payments/processor.py"} reward=0.00 done=false error=null
+[STEP] step=5 action={"action_type":"patch_file","target_file":"payments/processor.py","new_content":"..."} reward=0.00 done=false error=null
+[STEP] step=6 action={"action_type":"patch_file","target_file":"payments/processor.py","new_content":"..."} reward=0.90 done=false error=null
+[STEP] step=7 action={"action_type":"execute_command","command":"pytest tests/"} reward=0.00 done=false error=null
+[STEP] step=8 action={"action_type":"submit_review","summary":"..."} reward=1.00 done=true error=null
+[END] success=true steps=8 score=1.00 rewards=0.00,0.00,0.45,0.00,0.00,0.90,0.00,1.00
+
 [START] task=task_1_pr env=codereview-env model=llama-3.3-70b-versatile
 [STEP] step=1 action={"action_type":"execute_command","command":"pytest tests/"} reward=0.00 done=false error=null
-[STEP] step=3 action={"action_type":"patch_file","target_file":"auth/models.py",...} reward=0.45 done=false error=null
-[STEP] step=5 action={"action_type":"patch_file","target_file":"auth/crypto.py",...} reward=0.90 done=false error=null
-[STEP] step=7 action={"action_type":"submit_review",...} reward=1.00 done=true error=null
+[STEP] step=3 action={"action_type":"patch_file","target_file":"auth/models.py","new_content":"..."} reward=0.45 done=false error=null
+[STEP] step=5 action={"action_type":"patch_file","target_file":"auth/crypto.py","new_content":"..."} reward=0.90 done=false error=null
+[STEP] step=7 action={"action_type":"submit_review","summary":"..."} reward=1.00 done=true error=null
 [END] success=true steps=7 score=1.00 rewards=0.00,0.00,0.45,0.00,0.90,0.00,1.00
 
 [START] task=task_2_pr env=codereview-env model=llama-3.3-70b-versatile
-[STEP] step=4 action={"action_type":"patch_file","target_file":"billing/discounts.py",...} reward=0.45 done=false error=null
-[STEP] step=5 action={"action_type":"patch_file","target_file":"billing/cart.py",...} reward=0.90 done=false error=null
-[STEP] step=7 action={"action_type":"submit_review",...} reward=1.00 done=true error=null
+[STEP] step=4 action={"action_type":"patch_file","target_file":"billing/discounts.py","new_content":"..."} reward=0.45 done=false error=null
+[STEP] step=5 action={"action_type":"patch_file","target_file":"billing/cart.py","new_content":"..."} reward=0.90 done=false error=null
+[STEP] step=7 action={"action_type":"submit_review","summary":"..."} reward=1.00 done=true error=null
 [END] success=true steps=7 score=1.00 rewards=0.00,0.00,0.00,0.45,0.90,0.00,1.00
 
-[START] task=task_3_pr env=codereview-env model=llama-3.3-70b-versatile
-[STEP] step=7 action={"action_type":"patch_file","target_file":"payments/processor.py",...} reward=0.45 done=false error=null
-[STEP] step=10 action={"action_type":"patch_file","target_file":"payments/processor.py",...} reward=0.45 done=false error=null
-[END] success=false steps=10 score=0.45 rewards=0.00,0.00,0.00,0.00,0.00,0.00,0.45,0.00,0.00,0.45
-
-[SUMMARY] tasks=3 scores=1.00,1.00,0.45 average=0.82
+[SUMMARY] tasks=3 scores=1.00,1.00,1.00 average=1.00
 ```
 
-The 0.45 on task_3 reflects the dense reward working correctly: the agent fixed the async bug (earning partial credit), but ran out of steps before removing the hardcoded API key. An RL agent training on this trajectory has a clear signal to optimize: fix both bugs before step 10.
+The dense reward trajectory (`0.0 → 0.45 → 0.90 → 1.0`) is the key training signal: each `patch_file` earns credit proportional to the fraction of tests now passing. A weaker policy that fixes only one of the two bugs will plateau at 0.45; one that fixes both but never submits will plateau at 0.90. This gradient is what makes the environment useful for RL — the final score alone would not be sufficient signal.
 
 ---
 

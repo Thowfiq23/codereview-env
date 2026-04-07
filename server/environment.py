@@ -1,6 +1,7 @@
 import os
 import re
 import uuid
+import platform
 import subprocess
 import shutil
 from subprocess import TimeoutExpired
@@ -16,10 +17,21 @@ MAX_STEPS = 10
 # Deliberately excludes server credentials (HF_TOKEN, API keys, etc.)
 _CLEAN_ENV_KEYS = {"PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "USER", "LOGNAME"}
 
+# Windows requires these vars for Python/subprocess to initialise correctly.
+# Without SYSTEMROOT Python raises: Fatal Python error: _Py_HashRandomization_Init
+_WINDOWS_ENV_KEYS = {"SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "TEMP", "TMP", "COMSPEC"}
+
 
 def _make_clean_env(pythonpath: str) -> Dict[str, str]:
-    """Return a minimal subprocess environment — no server credentials leaked."""
-    clean = {k: v for k, v in os.environ.items() if k in _CLEAN_ENV_KEYS}
+    """Return a minimal subprocess environment — no server credentials leaked.
+
+    On Windows the standard allowlist is extended with OS-required variables
+    so that Python and pytest can initialise inside the sandbox.
+    """
+    keys = _CLEAN_ENV_KEYS.copy()
+    if platform.system() == "Windows":
+        keys |= _WINDOWS_ENV_KEYS
+    clean = {k: v for k, v in os.environ.items() if k in keys}
     clean["PYTHONPATH"] = pythonpath
     # Ensure python/pytest are findable even in minimal PATH
     if "PATH" not in clean:

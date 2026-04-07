@@ -30,7 +30,7 @@ API_KEY      = os.getenv("HF_TOKEN")
 ENV_URL      = os.getenv("ENV_URL", "http://localhost:7860")
 BENCHMARK    = "codereview-env"
 MAX_STEPS    = 10
-TEMPERATURE  = 0.1
+TEMPERATURE  = 0.0
 
 client = OpenAI(api_key=API_KEY, base_url=API_BASE_URL)
 

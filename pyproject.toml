@@ -24,6 +24,10 @@ dev = [
     "httpx>=0.24.0",
 ]
 
+# Top-level single-file modules (client, models, tasks, inference)
+[tool.setuptools]
+py-modules = ["client", "models", "tasks", "inference"]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["server*"]

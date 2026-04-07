@@ -309,13 +309,21 @@ class CodeReviewEnvironment:
             return obs, reward, done, info
 
         except Exception as e:
+            # Use self.state.done as the authoritative source.  If an exception
+            # fires after submit_review already set state.done=True and deleted
+            # the workspace, returning done=False would leave the caller unable
+            # to know the episode is over.  Also clean up the workspace if the
+            # episode is done (it may not have been removed yet).
+            current_done = self.state.done
+            if current_done and self.workspace_dir and os.path.exists(self.workspace_dir):
+                shutil.rmtree(self.workspace_dir, ignore_errors=True)
             obs = CodeObservation(
                 task_id=self.state.task_id if self.current_task_data else "error",
                 context="Error state",
                 available_files=[],
                 action_result=f"Internal Error: {str(e)}",
                 step_number=self.state.step_count,
-                done=False,
+                done=current_done,
                 reward=0.0
             )
-            return obs, 0.0, False, {"error": str(e)}
+            return obs, 0.0, current_done, {"error": str(e)}

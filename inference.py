@@ -165,8 +165,11 @@ def run_task(env: CodeReviewEnv, task_index: int) -> float:
                 flush=True
             )
 
-    except Exception:
-        pass
+    except Exception as fatal:
+        # Log catastrophic failures to stderr so the evaluator has diagnostics.
+        # Stdout must stay clean ([START]/[STEP]/[END] only).
+        print(f"[FATAL] task={task_name} error={str(fatal)[:300]}",
+              file=__import__('sys').stderr, flush=True)
 
     # Score = highest reward achieved during the episode (clamped to [0, 1])
     score = min(max(max(rewards) if rewards else 0.0, 0.0), 1.0)

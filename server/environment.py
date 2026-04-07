@@ -190,20 +190,26 @@ class CodeReviewEnvironment:
                 new_content = action_obj.new_content
                 if not target or not new_content:
                     obs_result = "Error: target_file and new_content are required."
-                elif ".." in target:
-                    obs_result = "Security Error: Path traversal detected and blocked."
                 else:
-                    full_path = os.path.join(self.workspace_dir, target)
-                    os.makedirs(os.path.dirname(full_path), exist_ok=True)
-                    with open(full_path, "w") as f:
-                        f.write(new_content)
-                    obs_result = f"Successfully patched: {target}"
-                    # Dense reward: 0.0–0.9 based on test pass rate after the patch
-                    reward = round(self._get_test_pass_rate() * 0.9, 4)
-                    # Accumulate to total_reward so state() reflects trajectory progress
-                    self.state.total_reward = round(
-                        max(self.state.total_reward, reward), 4
+                    # Resolve the real path and verify it stays inside the workspace.
+                    # This blocks both ".." traversal and absolute paths like /etc/passwd.
+                    workspace_real = os.path.realpath(self.workspace_dir)
+                    full_path = os.path.realpath(
+                        os.path.join(self.workspace_dir, target)
                     )
+                    if not full_path.startswith(workspace_real + os.sep):
+                        obs_result = "Security Error: Path traversal detected and blocked."
+                    else:
+                        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+                        with open(full_path, "w") as f:
+                            f.write(new_content)
+                        obs_result = f"Successfully patched: {target}"
+                        # Dense reward: 0.0–0.9 based on test pass rate after the patch
+                        reward = round(self._get_test_pass_rate() * 0.9, 4)
+                        # Accumulate to total_reward so state() reflects trajectory progress
+                        self.state.total_reward = round(
+                            max(self.state.total_reward, reward), 4
+                        )
 
             # --- TOOL 3: SUBMIT REVIEW (Final Execution Grader) ---
             elif action_obj.action_type == "submit_review":

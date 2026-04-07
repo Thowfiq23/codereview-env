@@ -16,7 +16,24 @@ Stdout format (mandatory):
 """
 
 import os
+import sys
 import json
+import logging
+
+# Suppress httpx/httpcore/openai INFO logs — they can emit to stdout and
+# break the strict [START]/[STEP]/[END] format the evaluator regex-parses.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("openai").setLevel(logging.WARNING)
+
+# Route any uncaught exception (import error, syntax error, etc.) to stderr
+# so stdout stays clean for the evaluator.
+def _global_excepthook(exctype, value, tb):
+    import traceback
+    print(f"[FATAL] {exctype.__name__}: {value}", file=sys.stderr, flush=True)
+    traceback.print_tb(tb, file=sys.stderr)
+sys.excepthook = _global_excepthook
+
 from openai import OpenAI
 from client import CodeReviewEnv
 from models import AgentAction

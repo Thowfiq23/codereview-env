@@ -75,6 +75,10 @@ class CodeReviewEnvironment:
             os.makedirs(os.path.dirname(full_path), exist_ok=True)
             with open(full_path, "w") as f:
                 f.write(content)
+            # Make test files read-only so the agent cannot overwrite them
+            # and earn a free 1.0 by replacing the grader with a trivial pass.
+            if filepath.startswith("tests/"):
+                os.chmod(full_path, 0o444)
 
     def cleanup(self):
         """Explicitly remove the current workspace. Called on server shutdown."""
@@ -187,6 +191,17 @@ class CodeReviewEnvironment:
                             capture_output=True, text=True, timeout=15, env=env
                         )
                         output = result.stdout if result.stdout else result.stderr
+                        # Truncate to prevent context-window exhaustion on the LLM side.
+                        # Verbose commands (npm install, find /, recursive pytest) can
+                        # emit megabytes; keep the last 4000 chars which contain the
+                        # actionable failure lines.
+                        MAX_OUTPUT_CHARS = 4000
+                        if len(output) > MAX_OUTPUT_CHARS:
+                            output = (
+                                f"...[TRUNCATED — {len(output)} chars, "
+                                f"showing last {MAX_OUTPUT_CHARS}]...\n"
+                                + output[-MAX_OUTPUT_CHARS:]
+                            )
                         obs_result = f"--- BASH OUTPUT (Exit Code {result.returncode}) ---\n{output}"
                     except TimeoutExpired:
                         obs_result = "Error: Command timed out after 15 seconds. Avoid long-running or interactive commands."
@@ -197,6 +212,10 @@ class CodeReviewEnvironment:
                 new_content = action_obj.new_content
                 if not target or not new_content:
                     obs_result = "Error: target_file and new_content are required."
+                elif target.startswith("tests/") or target == "tests":
+                    # Test files are read-only graders — modifying them would
+                    # let an agent earn 1.0 by replacing the assertions with pass.
+                    obs_result = "Security Error: Test files are read-only and cannot be modified by the agent."
                 else:
                     # Resolve the real path and verify it stays inside the workspace.
                     # This blocks both ".." traversal and absolute paths like /etc/passwd.

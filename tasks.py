@@ -57,8 +57,19 @@ def test_hardcoded_keys():
     assert not STRIPE_LIVE_KEY or 'sk_live_' not in STRIPE_LIVE_KEY, "Security Error: Hardcoded live Stripe key found in config.py!"
 
 def test_performance():
+    import ast
     source = inspect.getsource(process_payment)
-    assert 'async def' in source and 'asyncio.sleep' in source, "Performance Error: process_payment must be async def and use asyncio.sleep."
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        assert False, "Performance Error: process_payment source could not be parsed."
+    async_funcs = [n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == 'process_payment']
+    assert async_funcs, "Performance Error: process_payment must be declared as 'async def'."
+    has_await_sleep = any(
+        isinstance(n, ast.Await) and isinstance(n.value, ast.Call)
+        for n in ast.walk(async_funcs[0])
+    )
+    assert has_await_sleep, "Performance Error: process_payment must use 'await asyncio.sleep(...)'."
 """
         }
     }

@@ -110,6 +110,10 @@ def run_task(env: CodeReviewEnv, task_index: int) -> float:
             error_str = "null"
             reward = 0.0
 
+            # Track whether an assistant turn was committed so we always
+            # close it with a user turn — even on validation/step failure.
+            assistant_appended = False
+
             try:
                 response = client.chat.completions.create(
                     model=MODEL_NAME,
@@ -128,6 +132,7 @@ def run_task(env: CodeReviewEnv, task_index: int) -> float:
                     action_str = clean.replace("\n", " ").replace("\r", "")[:300]
 
                 messages.append({"role": "assistant", "content": clean})
+                assistant_appended = True
 
                 action_obj = AgentAction.model_validate_json(clean)
                 obs, reward, done, info = env.step(action_obj)
@@ -139,6 +144,19 @@ def run_task(env: CodeReviewEnv, task_index: int) -> float:
 
             except Exception as exc:
                 error_str = str(exc).replace("\n", " ")[:200]
+                # If an assistant turn was committed but no user reply followed,
+                # inject an error message so the LLM sees its mistake and can
+                # self-correct on the next step instead of repeating the same
+                # malformed output until MAX_STEPS is exhausted.
+                if assistant_appended:
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            f"ERROR: Your response could not be executed: {error_str}\n"
+                            "Output ONLY valid JSON with no markdown, no backticks, "
+                            "and no explanation. Try again."
+                        )
+                    })
 
             rewards.append(reward)
             print(

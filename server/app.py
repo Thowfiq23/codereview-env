@@ -4,7 +4,7 @@ from typing import Any, Dict
 
 from fastapi import FastAPI, Request
 
-from models import CodeObservation, AgentAction, EpisodeReward
+from models import CodeObservation, AgentAction, EpisodeReward, ReviewState
 from tasks import TASKS, list_task_ids
 from .environment import CodeReviewEnvironment
 
@@ -28,7 +28,92 @@ env = CodeReviewEnvironment()
 
 @app.get("/health")
 async def health_check() -> Dict[str, str]:
-    return {"status": "ok"}
+    # Return "healthy" as required by openenv validate --url
+    return {"status": "healthy"}
+
+
+@app.get("/metadata")
+async def get_metadata() -> Dict[str, Any]:
+    """OpenEnv spec: returns environment name and description."""
+    return {
+        "name": "codereview-env",
+        "description": (
+            "SWE-bench style autonomous code review and patching POMDP sandbox. "
+            "Agents fix real bugs in Python repos; pytest grades the fix."
+        ),
+        "version": "1.0.0",
+        "author": "Thowfiq Rahman A",
+    }
+
+
+@app.get("/schema")
+async def get_schema() -> Dict[str, Any]:
+    """OpenEnv spec: returns JSON schemas for action, observation, and state."""
+    return {
+        "action": AgentAction.model_json_schema(),
+        "observation": CodeObservation.model_json_schema(),
+        "state": ReviewState.model_json_schema(),
+    }
+
+
+@app.post("/mcp")
+async def mcp_endpoint(request: Request) -> Dict[str, Any]:
+    """OpenEnv spec: minimal JSON-RPC 2.0 MCP endpoint."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    method = body.get("method", "")
+    req_id = body.get("id", 1)
+
+    if method == "tools/list":
+        tools = [
+            {
+                "name": "execute_command",
+                "description": "Run a bash command in the sandbox.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action_type": {"type": "string", "const": "execute_command"},
+                        "command": {"type": "string"},
+                    },
+                    "required": ["action_type", "command"],
+                },
+            },
+            {
+                "name": "patch_file",
+                "description": "Overwrite a file with new content.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action_type": {"type": "string", "const": "patch_file"},
+                        "target_file": {"type": "string"},
+                        "new_content": {"type": "string"},
+                    },
+                    "required": ["action_type", "target_file", "new_content"],
+                },
+            },
+            {
+                "name": "submit_review",
+                "description": "Submit the final review and trigger grading.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action_type": {"type": "string", "const": "submit_review"},
+                        "summary": {"type": "string"},
+                    },
+                    "required": ["action_type", "summary"],
+                },
+            },
+        ]
+        return {"jsonrpc": "2.0", "id": req_id, "result": {"tools": tools}}
+
+    # Fallback: acknowledge unknown methods
+    return {
+        "jsonrpc": "2.0",
+        "id": req_id,
+        "result": {"status": "ok", "method": method},
+    }
 
 
 @app.get("/tasks")

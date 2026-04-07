@@ -309,7 +309,7 @@ A policy with random or shallow reasoning will plateau at 0.45 (one bug fixed) o
 [STEP] step=6 action={"action_type":"patch_file","target_file":"payments/processor.py","new_content":"import asyncio\n\nasync def process_payment(user_id, amount):\n    await asyncio.sleep(5)\n    return True"} reward=0.90 done=false error=null
 [STEP] step=7 action={"action_type":"execute_command","command":"pytest tests/"} reward=0.00 done=false error=null
 [STEP] step=8 action={"action_type":"submit_review","summary":"Fixed hardcoded Stripe API key and declared process_payment as async with await asyncio.sleep."} reward=1.00 done=true error=null
-[END] success=true steps=8 score=1.00 rewards=0.00,0.00,0.45,0.00,0.00,0.90,0.00,1.00
+[END] success=true steps=8 rewards=0.00,0.00,0.45,0.00,0.00,0.90,0.00,1.00
 
 [START] task=task_1_pr env=codereview-env model=llama-3.3-70b-versatile
 [STEP] step=1 action={"action_type":"execute_command","command":"pytest tests/"} reward=0.00 done=false error=null
@@ -319,7 +319,7 @@ A policy with random or shallow reasoning will plateau at 0.45 (one bug fixed) o
 [STEP] step=5 action={"action_type":"patch_file","target_file":"auth/crypto.py","new_content":"import hashlib\nimport secrets\n\ndef hash_password(password: str):\n    salt = secrets.token_bytes(16)\n    return hashlib.pbkdf2_hmac('sha256', password.encode(), salt, 100000).hex() + salt.hex()"} reward=0.90 done=false error=null
 [STEP] step=6 action={"action_type":"execute_command","command":"pytest tests/"} reward=0.00 done=false error=null
 [STEP] step=7 action={"action_type":"submit_review","summary":"Fixed SQL injection with parameterized query and replaced MD5 with PBKDF2."} reward=1.00 done=true error=null
-[END] success=true steps=7 score=1.00 rewards=0.00,0.00,0.45,0.00,0.90,0.00,1.00
+[END] success=true steps=7 rewards=0.00,0.00,0.45,0.00,0.90,0.00,1.00
 
 [START] task=task_2_pr env=codereview-env model=llama-3.3-70b-versatile
 [STEP] step=1 action={"action_type":"execute_command","command":"pytest tests/"} reward=0.00 done=false error=null
@@ -329,7 +329,7 @@ A policy with random or shallow reasoning will plateau at 0.45 (one bug fixed) o
 [STEP] step=5 action={"action_type":"patch_file","target_file":"billing/cart.py","new_content":"from billing.discounts import apply_discount\n\ndef calculate_total(items):\n    total = sum(item['price'] * item['quantity'] for item in items)\n    return apply_discount(total)"} reward=0.90 done=false error=null
 [STEP] step=6 action={"action_type":"execute_command","command":"pytest tests/"} reward=0.00 done=false error=null
 [STEP] step=7 action={"action_type":"submit_review","summary":"Fixed quantity multiplication and discount percentage."} reward=1.00 done=true error=null
-[END] success=true steps=7 score=1.00 rewards=0.00,0.00,0.00,0.45,0.90,0.00,1.00
+[END] success=true steps=7 rewards=0.00,0.00,0.00,0.45,0.90,0.00,1.00
 
 [SUMMARY] tasks=3 scores=1.00,1.00,1.00 average=1.00
 ```

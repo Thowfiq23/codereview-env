@@ -192,28 +192,28 @@ The `context` field is the agent's only briefing — it describes the PR, the fa
 The reward is **dense by design** — every `patch_file` produces a signal proportional to how many tests now pass. This gives RL algorithms gradient information throughout the trajectory, not just at episode end.
 
 ```
-0.0 ─────────── 0.45 ────────────── 0.90 ──────── 1.0
+0.01 ─────────── 0.45 ────────────── 0.89 ──────── 0.99
   execute cmds     1 of 2 bugs fixed   both fixed    submit
 ```
 
 | Action | Reward | Formula |
 |--------|--------|---------|
-| `execute_command` | `0.0` | Exploration is free |
-| `patch_file` — no tests gained | `0.0` | Bad patch, no signal |
-| `patch_file` — partial fix | `0.0 – 0.9` | `(tests_passing / total_tests) × 0.9` |
-| `submit_review` — all tests pass | `1.0` | Full credit, terminal |
-| `submit_review` — partial tests pass | `0.0 – 1.0` | `tests_passing / total_tests` |
-| Max steps (10) exceeded | `0.0` | Episode terminates |
+| `execute_command` | `0.01` | Exploration floor — strictly above zero |
+| `patch_file` — no tests gained | `0.01` | Floor reward, bad patch |
+| `patch_file` — partial fix | `0.01 – 0.89` | `0.01 + (tests_passing / total_tests) × 0.88` |
+| `submit_review` — all tests pass | `0.99` | Full credit, terminal |
+| `submit_review` — partial tests pass | `0.01 – 0.98` | `0.01 + (tests_passing / total_tests) × 0.97` |
+| Max steps (10) exceeded | `0.01` | Episode terminates at floor |
 
-**The 0.9 cap on `patch_file`** creates an intentional final incentive: a perfect patch earns 0.9, but the agent must call `submit_review` to earn the full 1.0. This penalizes "patch and stall" strategies and rewards agents that understand when they are done.
+**The 0.89 cap on `patch_file`** creates an intentional final incentive: a perfect patch earns 0.89, but the agent must call `submit_review` to earn the full 0.99. This penalizes "patch and stall" strategies and rewards agents that understand when they are done.
 
 **Episode score** = `max(rewards)` over the trajectory — the highest reward the agent achieved. A policy that solves the task in 5 steps scores the same as one that solves it in 9 steps, but the step count is visible in the trajectory for human analysis.
 
 **Built-in penalties:**
-- Attempting path traversal returns an error observation (0.0 reward, no disk write)
-- Attempting to overwrite test files returns an error (0.0 reward)
-- Syntax-invalid patches are rejected before touching disk (0.0 reward)
-- Commands exceeding 15 seconds are killed (0.0 reward, timeout message)
+- Attempting path traversal returns an error observation (0.01 floor reward, no disk write)
+- Attempting to overwrite test files returns an error (0.01 floor reward)
+- Syntax-invalid patches are rejected before touching disk (0.01 floor reward)
+- Commands exceeding 15 seconds are killed (0.01 floor reward, timeout message)
 
 ---
 
@@ -230,8 +230,8 @@ The reward is **dense by design** — every `patch_file` produces a signal propo
 
 **Grader:** Tests check structural properties (parameterized tuple returned, `md5` not present in hash function) — not runtime values. The agent must understand what a secure pattern looks like, not just copy a string.
 
-**Baseline (Llama-3.3-70B, temp=0.0):** Solved in **7 steps**, score **1.00**
-Reward trajectory: `0.00 → 0.00 → 0.45 → 0.00 → 0.90 → 0.00 → 1.00`
+**Baseline (Llama-3.3-70B, temp=0.0):** Solved in **7 steps**, score **0.99**
+Reward trajectory: `0.01 → 0.01 → 0.45 → 0.01 → 0.89 → 0.01 → 0.99`
 
 ---
 
@@ -246,8 +246,8 @@ Reward trajectory: `0.00 → 0.00 → 0.45 → 0.00 → 0.90 → 0.00 → 1.00`
 
 **Grader:** Tests run the buggy function with known inputs and assert exact numeric output. The agent cannot guess — it must trace the arithmetic.
 
-**Baseline (Llama-3.3-70B, temp=0.0):** Solved in **7 steps**, score **1.00**
-Reward trajectory: `0.00 → 0.00 → 0.00 → 0.45 → 0.90 → 0.00 → 1.00`
+**Baseline (Llama-3.3-70B, temp=0.0):** Solved in **7 steps**, score **0.99**
+Reward trajectory: `0.01 → 0.01 → 0.01 → 0.45 → 0.89 → 0.01 → 0.99`
 
 ---
 
@@ -270,9 +270,9 @@ async_funcs = [n for n in ast.walk(tree)
 has_await = any(isinstance(n, ast.Await) for n in ast.walk(async_funcs[0]))
 ```
 
-**Baseline (Llama-3.3-70B, temp=0.0):** Solved in **8 steps**, score **1.00**
-Reward trajectory: `0.00 → 0.00 → 0.45 → 0.00 → 0.00 → 0.90 → 0.00 → 1.00`
-*(Step 5 patches processor.py as `def` — grader rejects it. Step 6 corrects to `async def` + `await`.)*
+**Baseline (Llama-3.3-70B, temp=0.0):** Solved in **8 steps**, score **0.99**
+Reward trajectory: `0.01 → 0.01 → 0.45 → 0.01 → 0.01 → 0.89 → 0.01 → 0.99`
+*(Step 5 patches processor.py as `def` — grader returns floor 0.01. Step 6 corrects to `async def` + `await`.)*
 
 ---
 

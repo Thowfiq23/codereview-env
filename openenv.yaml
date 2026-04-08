@@ -6,15 +6,45 @@ type: space
 runtime: fastapi
 app: server.app:app
 port: 7860
+
 tasks:
-  - task_1_pr
-  - task_2_pr
-  - task_3_pr
+  - id: task_1_pr
+    description: "Fix SQL injection vulnerability and weak MD5 hashing in authentication code"
+    steps: 10
+    difficulty: easy
+  - id: task_2_pr
+    description: "Fix shopping cart quantity bug and incorrect discount percentage"
+    steps: 10
+    difficulty: medium
+  - id: task_3_pr
+    description: "Fix hardcoded Stripe live key and synchronous payment processing bottleneck"
+    steps: 10
+    difficulty: hard
+
 action_model: AgentAction
 observation_model: CodeObservation
 state_model: ReviewState
-max_steps: 10
-reward_range: [0.0, 1.0]
+
+observation_space:
+  type: text
+
+action_space:
+  type: discrete
+  actions:
+    - execute_command
+    - patch_file
+    - submit_review
+
+scoring:
+  reward_range: [0.0, 1.0]
+  success_threshold: 0.5
+  score_formula: max(step_rewards)
+
+constraints:
+  max_runtime_seconds: 1200
+  max_memory_gb: 8
+  max_vcpu: 2
+
 tags:
   - code-review
   - swe-bench

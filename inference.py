@@ -207,7 +207,7 @@ def run_task(env: CodeReviewEnv, task_index: int) -> float:
             rewards.append(reward)
             print(
                 f"[STEP] step={step} action={action_str} "
-                f"reward={reward:.2f} done={str(done).lower()} error={error_str}",
+                f"reward={reward:.3f} done={str(done).lower()} error={error_str}",
                 flush=True
             )
 
@@ -227,7 +227,7 @@ def run_task(env: CodeReviewEnv, task_index: int) -> float:
     # [END] format follows the OpenEnv spec (sample inference.py):
     # success steps score rewards  — evaluator regex-parses score= for task scoring
     print(
-        f"[END] success={str(success).lower()} steps={step} score={score:.2f} rewards={rewards_str}",
+        f"[END] success={str(success).lower()} steps={step} score={score:.3f} rewards={rewards_str}",
         flush=True
     )
 

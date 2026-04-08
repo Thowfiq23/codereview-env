@@ -209,6 +209,8 @@ class CodeReviewEnvironment:
                         obs_result = f"--- BASH OUTPUT (Exit Code {result.returncode}) ---\n{output}"
                     except TimeoutExpired:
                         obs_result = "Error: Command timed out after 15 seconds. Avoid long-running or interactive commands."
+                # execute_command never returns exactly 0 — evaluator requires open interval (0, 1)
+                reward = 0.01
 
             # --- TOOL 2: PATCH FILE (Physical Disk Write + Dense Partial Reward) ---
             elif action_obj.action_type == "patch_file":
@@ -257,8 +259,10 @@ class CodeReviewEnvironment:
                             with open(full_path, "w") as f:
                                 f.write(new_content)
                             obs_result = f"Successfully patched: {target}"
-                            # Dense reward: 0.0–0.9 based on test pass rate after the patch
-                            reward = round(self._get_test_pass_rate() * 0.9, 4)
+                            # Dense reward: strictly in (0, 1) — evaluator requires open interval.
+                            # Map test_pass_rate to (0.01, 0.89): partial credit without hitting 0 or 1.
+                            raw = self._get_test_pass_rate()
+                            reward = round(0.01 + raw * 0.88, 4)
                             # Accumulate to total_reward so state() reflects trajectory progress
                             self.state.total_reward = round(
                                 max(self.state.total_reward, reward), 4
@@ -273,13 +277,15 @@ class CodeReviewEnvironment:
                         capture_output=True, text=True, timeout=15, env=env
                     )
                     if result.returncode == 0:
-                        reward = 1.0
+                        reward = 0.99
                         feedback = "SUCCESS: All tests passed."
                     else:
-                        reward = self._get_test_pass_rate()
+                        raw = self._get_test_pass_rate()
+                        # Map to (0.01, 0.98) — never exactly 0 or 1 (evaluator requires open interval)
+                        reward = round(0.01 + raw * 0.97, 4)
                         feedback = f"FAILED: Tests still failing.\n{result.stdout[-500:]}"
                 except TimeoutExpired:
-                    reward = 0.0
+                    reward = 0.01
                     feedback = "FAILED: Test suite timed out."
 
                 obs_result = f"Evaluation complete. {feedback}"

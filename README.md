@@ -21,7 +21,7 @@ tags:
 > An LLM agent is dropped into a real Linux sandbox with a failing CI/CD pipeline — it must investigate, patch, and verify real Python bugs. A real `pytest` runner grades every fix.
 
 [![OpenEnv](https://img.shields.io/badge/OpenEnv-compliant-blue)](https://openenv.dev)
-[![HF Space](https://img.shields.io/badge/HuggingFace-Space-yellow)](https://huggingface.co/spaces/Thowfiq23/codereview-env-staging)
+[![HF Space](https://img.shields.io/badge/HuggingFace-Space-yellow)](https://huggingface.co/spaces/Thowfiq23/CodeReview-Env)
 [![openenv validate](https://img.shields.io/badge/openenv%20validate-6%2F6%20PASS-brightgreen)](#spec-compliance)
 [![Docker](https://img.shields.io/badge/Docker-builds%20%26%20runs-blue)](#run-with-docker)
 
@@ -280,63 +280,63 @@ Reward trajectory: `0.00 → 0.00 → 0.45 → 0.00 → 0.00 → 0.90 → 0.00 �
 
 | Task | Domain | Bugs | Steps | Trajectory | Score |
 |------|--------|------|-------|------------|-------|
-| `task_1_pr` | Security | 2 | 7 | `0→0.45→0.90→1.0` | **1.00** |
-| `task_2_pr` | Arithmetic Logic | 2 | 7 | `0→0.45→0.90→1.0` | **1.00** |
-| `task_3_pr` | Security + Async | 2 | 8 (+1 failed patch) | `0→0.45→0→0.90→1.0` | **1.00** |
+| `task_1_pr` | Security | 2 | 7 | `0.01→0.45→0.89→0.99` | **0.99** |
+| `task_2_pr` | Arithmetic Logic | 2 | 7 | `0.01→0.45→0.89→0.99` | **0.99** |
+| `task_3_pr` | Security + Async | 2 | 8 (+1 failed patch) | `0.01→0.45→0.01→0.89→0.99` | **0.99** |
 
 The difficulty is visible in **two places**:
 1. **Step count** — task_3 requires more attempts to reach 0.90
-2. **Failed patch mid-trajectory** — task_3 produces a `0.00` mid-episode after a syntactically valid but semantically wrong patch (`def` instead of `async def`), which a weaker agent would not self-correct
+2. **Failed patch mid-trajectory** — task_3 produces a `0.01` (floor) mid-episode after a syntactically valid but semantically wrong patch (`def` instead of `async def`), which a weaker agent would not self-correct
 
-A policy with random or shallow reasoning will plateau at 0.45 (one bug fixed) or 0.0 (no bugs fixed). The dense gradient gives an RL agent the signal to improve.
+A policy with random or shallow reasoning will plateau at 0.45 (one bug fixed) or 0.01 (floor — no bugs fixed). The dense gradient gives an RL agent the signal to improve.
 
 ---
 
 ## Baseline Results
 
-**Model:** `llama-3.3-70b-versatile` via Groq API
+**Model:** `meta-llama/Llama-3.3-70B-Instruct` via HF Router (inference.py default)
 **Temperature:** `0.0` (fully deterministic — results are exactly reproducible)
 **Infrastructure:** 2 vCPU / 4 GB RAM (well within the 8 GB limit)
 **Runtime:** ~3 minutes for all 3 tasks
 
 ```
-[START] task=task_3_pr env=codereview-env model=llama-3.3-70b-versatile
-[STEP] step=1 action={"action_type":"execute_command","command":"pytest tests/"} reward=0.00 done=false error=null
-[STEP] step=2 action={"action_type":"execute_command","command":"cat payments/config.py"} reward=0.00 done=false error=null
+[START] task=task_3_pr env=codereview-env model=meta-llama/Llama-3.3-70B-Instruct
+[STEP] step=1 action={"action_type":"execute_command","command":"pytest tests/"} reward=0.01 done=false error=null
+[STEP] step=2 action={"action_type":"execute_command","command":"cat payments/config.py"} reward=0.01 done=false error=null
 [STEP] step=3 action={"action_type":"patch_file","target_file":"payments/config.py","new_content":"import os\n\nSTRIPE_TEST_KEY = os.getenv('STRIPE_TEST_KEY')\nSTRIPE_LIVE_KEY = os.getenv('STRIPE_LIVE_KEY')"} reward=0.45 done=false error=null
-[STEP] step=4 action={"action_type":"execute_command","command":"cat payments/processor.py"} reward=0.00 done=false error=null
-[STEP] step=5 action={"action_type":"patch_file","target_file":"payments/processor.py","new_content":"import asyncio\n\ndef process_payment(user_id, amount):\n    await asyncio.sleep(5)\n    return True"} reward=0.00 done=false error=null
-[STEP] step=6 action={"action_type":"patch_file","target_file":"payments/processor.py","new_content":"import asyncio\n\nasync def process_payment(user_id, amount):\n    await asyncio.sleep(5)\n    return True"} reward=0.90 done=false error=null
-[STEP] step=7 action={"action_type":"execute_command","command":"pytest tests/"} reward=0.00 done=false error=null
-[STEP] step=8 action={"action_type":"submit_review","summary":"Fixed hardcoded Stripe API key and declared process_payment as async with await asyncio.sleep."} reward=1.00 done=true error=null
-[END] success=true steps=8 rewards=0.00,0.00,0.45,0.00,0.00,0.90,0.00,1.00
+[STEP] step=4 action={"action_type":"execute_command","command":"cat payments/processor.py"} reward=0.01 done=false error=null
+[STEP] step=5 action={"action_type":"patch_file","target_file":"payments/processor.py","new_content":"import asyncio\n\ndef process_payment(user_id, amount):\n    await asyncio.sleep(5)\n    return True"} reward=0.01 done=false error=null
+[STEP] step=6 action={"action_type":"patch_file","target_file":"payments/processor.py","new_content":"import asyncio\n\nasync def process_payment(user_id, amount):\n    await asyncio.sleep(5)\n    return True"} reward=0.89 done=false error=null
+[STEP] step=7 action={"action_type":"execute_command","command":"pytest tests/"} reward=0.01 done=false error=null
+[STEP] step=8 action={"action_type":"submit_review","summary":"Fixed hardcoded Stripe API key and declared process_payment as async with await asyncio.sleep."} reward=0.99 done=true error=null
+[END] success=true steps=8 rewards=0.01,0.01,0.45,0.01,0.01,0.89,0.01,0.99
 
-[START] task=task_1_pr env=codereview-env model=llama-3.3-70b-versatile
-[STEP] step=1 action={"action_type":"execute_command","command":"pytest tests/"} reward=0.00 done=false error=null
-[STEP] step=2 action={"action_type":"execute_command","command":"cat auth/models.py"} reward=0.00 done=false error=null
+[START] task=task_1_pr env=codereview-env model=meta-llama/Llama-3.3-70B-Instruct
+[STEP] step=1 action={"action_type":"execute_command","command":"pytest tests/"} reward=0.01 done=false error=null
+[STEP] step=2 action={"action_type":"execute_command","command":"cat auth/models.py"} reward=0.01 done=false error=null
 [STEP] step=3 action={"action_type":"patch_file","target_file":"auth/models.py","new_content":"def get_user_query(username):\n    return ('SELECT * FROM users WHERE username = %s', (username,))"} reward=0.45 done=false error=null
-[STEP] step=4 action={"action_type":"execute_command","command":"cat auth/crypto.py"} reward=0.00 done=false error=null
-[STEP] step=5 action={"action_type":"patch_file","target_file":"auth/crypto.py","new_content":"import hashlib\nimport secrets\n\ndef hash_password(password: str):\n    salt = secrets.token_bytes(16)\n    return hashlib.pbkdf2_hmac('sha256', password.encode(), salt, 100000).hex() + salt.hex()"} reward=0.90 done=false error=null
-[STEP] step=6 action={"action_type":"execute_command","command":"pytest tests/"} reward=0.00 done=false error=null
-[STEP] step=7 action={"action_type":"submit_review","summary":"Fixed SQL injection with parameterized query and replaced MD5 with PBKDF2."} reward=1.00 done=true error=null
-[END] success=true steps=7 rewards=0.00,0.00,0.45,0.00,0.90,0.00,1.00
+[STEP] step=4 action={"action_type":"execute_command","command":"cat auth/crypto.py"} reward=0.01 done=false error=null
+[STEP] step=5 action={"action_type":"patch_file","target_file":"auth/crypto.py","new_content":"import hashlib\nimport secrets\n\ndef hash_password(password: str):\n    salt = secrets.token_bytes(16)\n    return hashlib.pbkdf2_hmac('sha256', password.encode(), salt, 100000).hex() + salt.hex()"} reward=0.89 done=false error=null
+[STEP] step=6 action={"action_type":"execute_command","command":"pytest tests/"} reward=0.01 done=false error=null
+[STEP] step=7 action={"action_type":"submit_review","summary":"Fixed SQL injection with parameterized query and replaced MD5 with PBKDF2."} reward=0.99 done=true error=null
+[END] success=true steps=7 rewards=0.01,0.01,0.45,0.01,0.89,0.01,0.99
 
-[START] task=task_2_pr env=codereview-env model=llama-3.3-70b-versatile
-[STEP] step=1 action={"action_type":"execute_command","command":"pytest tests/"} reward=0.00 done=false error=null
-[STEP] step=2 action={"action_type":"execute_command","command":"cat billing/cart.py"} reward=0.00 done=false error=null
-[STEP] step=3 action={"action_type":"execute_command","command":"cat billing/discounts.py"} reward=0.00 done=false error=null
+[START] task=task_2_pr env=codereview-env model=meta-llama/Llama-3.3-70B-Instruct
+[STEP] step=1 action={"action_type":"execute_command","command":"pytest tests/"} reward=0.01 done=false error=null
+[STEP] step=2 action={"action_type":"execute_command","command":"cat billing/cart.py"} reward=0.01 done=false error=null
+[STEP] step=3 action={"action_type":"execute_command","command":"cat billing/discounts.py"} reward=0.01 done=false error=null
 [STEP] step=4 action={"action_type":"patch_file","target_file":"billing/discounts.py","new_content":"def apply_discount(amount):\n    return amount * 0.80"} reward=0.45 done=false error=null
-[STEP] step=5 action={"action_type":"patch_file","target_file":"billing/cart.py","new_content":"from billing.discounts import apply_discount\n\ndef calculate_total(items):\n    total = sum(item['price'] * item['quantity'] for item in items)\n    return apply_discount(total)"} reward=0.90 done=false error=null
-[STEP] step=6 action={"action_type":"execute_command","command":"pytest tests/"} reward=0.00 done=false error=null
-[STEP] step=7 action={"action_type":"submit_review","summary":"Fixed quantity multiplication and discount percentage."} reward=1.00 done=true error=null
-[END] success=true steps=7 rewards=0.00,0.00,0.00,0.45,0.90,0.00,1.00
+[STEP] step=5 action={"action_type":"patch_file","target_file":"billing/cart.py","new_content":"from billing.discounts import apply_discount\n\ndef calculate_total(items):\n    total = sum(item['price'] * item['quantity'] for item in items)\n    return apply_discount(total)"} reward=0.89 done=false error=null
+[STEP] step=6 action={"action_type":"execute_command","command":"pytest tests/"} reward=0.01 done=false error=null
+[STEP] step=7 action={"action_type":"submit_review","summary":"Fixed quantity multiplication and discount percentage."} reward=0.99 done=true error=null
+[END] success=true steps=7 rewards=0.01,0.01,0.01,0.45,0.89,0.01,0.99
 
-[SUMMARY] tasks=3 scores=1.00,1.00,1.00 average=1.00
+[SUMMARY] tasks=3 scores=0.99,0.99,0.99 average=0.99
 ```
 
 > Note: The dense trajectory is the key output for RL training. Step 5 of task_3 shows the grader
 > correctly rejecting a syntactically valid but semantically wrong patch (`def` without `async`),
-> returning `reward=0.00`. The agent self-corrects on step 6 and earns `0.90`. This demonstrates
+> returning `reward=0.01` (floor). The agent self-corrects on step 6 and earns `0.89`. This demonstrates
 > that the grader enforces semantic correctness, not just syntactic validity.
 
 ---
@@ -376,9 +376,9 @@ PYTHONPATH=$PWD python3 -m uvicorn server.app:app --host 0.0.0.0 --port 7860
 ### Run the Baseline Agent
 
 ```bash
-export HF_TOKEN=your_groq_or_hf_api_key
-export MODEL_NAME=llama-3.3-70b-versatile
-export API_BASE_URL=https://api.groq.com/openai/v1   # or https://router.huggingface.co/v1
+export HF_TOKEN=your_hf_api_key
+export MODEL_NAME=meta-llama/Llama-3.3-70B-Instruct  # default
+export API_BASE_URL=https://router.huggingface.co/v1  # default
 export ENV_URL=http://localhost:7860                  # or the HF Space URL
 
 python3 inference.py
@@ -387,7 +387,7 @@ python3 inference.py
 ### Run Against the Live HF Space
 
 ```bash
-export ENV_URL=https://thowfiq23-codereview-env-staging.hf.space
+export ENV_URL=https://thowfiq23-codereview-env.hf.space
 python3 inference.py
 ```
 

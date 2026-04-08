@@ -6,8 +6,7 @@ Runs an LLM agent against all 3 tasks in the CodeReview-Env sandbox.
 Required env vars:
   API_BASE_URL    - LLM API endpoint (default: HF Router)
   MODEL_NAME      - Model identifier
-  HF_TOKEN        - Hugging Face API key (primary)
-  OPENAI_API_KEY  - OpenAI-compatible API key (fallback if HF_TOKEN not set)
+  HF_TOKEN        - Hugging Face API key (mandatory, no default)
   ENV_URL         - Environment server URL (default: http://localhost:7860)
 
 Stdout format (mandatory — exact OpenEnv spec):
@@ -45,7 +44,6 @@ from models import AgentAction
 # ---------------------------------------------------------------------------
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME   = os.getenv("MODEL_NAME", "meta-llama/Llama-3.3-70B-Instruct")
-# Support both HF_TOKEN (primary) and OPENAI_API_KEY (spec fallback)
 HF_TOKEN     = os.getenv("HF_TOKEN")
 if HF_TOKEN is None:
     raise ValueError("HF_TOKEN environment variable is required")
@@ -179,6 +177,11 @@ def run_task(env: CodeReviewEnv, task_index: int) -> float:
 
                 action_obj = AgentAction.model_validate_json(clean)
                 obs, reward, done, info = env.step(action_obj)
+
+                # error= must reflect the env-side action error, not a local exception
+                env_error = info.get("error") if info else None
+                if env_error:
+                    error_str = str(env_error).replace("\n", " ")[:200]
 
                 messages.append({
                     "role": "user",

@@ -33,6 +33,15 @@ def _make_clean_env(pythonpath: str) -> Dict[str, str]:
         keys |= _WINDOWS_ENV_KEYS
     clean = {k: v for k, v in os.environ.items() if k in keys}
     clean["PYTHONPATH"] = pythonpath
+    # Prevent Python from writing .pyc bytecode files into the workspace.
+    # Without this, the first pytest run compiles source files into
+    # __pycache__/*.pyc with mtime stored at second precision. If a
+    # patch_file write happens within the same second, the new source
+    # file gets the same mtime as the cached .pyc, so Python re-uses
+    # the stale bytecode and the test sees old code — producing a wrong
+    # reward. Setting this flag ensures every subprocess import reads
+    # fresh source directly.
+    clean["PYTHONDONTWRITEBYTECODE"] = "1"
     # Ensure python/pytest are findable even in minimal PATH
     if "PATH" not in clean:
         clean["PATH"] = "/usr/local/bin:/usr/bin:/bin"

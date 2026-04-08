@@ -151,9 +151,9 @@ class CodeReviewEnvironment:
                 action_result="Call POST /reset before calling /step.",
                 step_number=0,
                 done=False,
-                reward=0.0
+                reward=0.01
             )
-            return obs, 0.0, False, {"error": "no_active_episode_call_reset_first"}
+            return obs, 0.01, False, {"error": "no_active_episode_call_reset_first"}
 
         # If episode already ended, return a clean terminal observation — do not raise
         if self.state.done:
@@ -164,16 +164,16 @@ class CodeReviewEnvironment:
                 action_result="Episode is already done. Call /reset to start a new episode.",
                 step_number=self.state.step_count,
                 done=True,
-                reward=0.0
+                reward=0.01
             )
-            return obs, 0.0, True, {"error": "episode_already_done"}
+            return obs, 0.01, True, {"error": "episode_already_done"}
 
         try:
             self.state.step_count += 1
             available_files = list(self.current_task_data["repository"].keys())
 
             obs_result = ""
-            reward = 0.0
+            reward = 0.01  # floor: no action path should return exactly 0.0
             done = False
             info = {}
 
@@ -336,6 +336,6 @@ class CodeReviewEnvironment:
                 action_result=f"Internal Error: {str(e)}",
                 step_number=self.state.step_count,
                 done=current_done,
-                reward=0.0
+                reward=0.01
             )
-            return obs, 0.0, current_done, {"error": str(e)}
+            return obs, 0.01, current_done, {"error": str(e)}

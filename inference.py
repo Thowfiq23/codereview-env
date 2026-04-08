@@ -106,9 +106,9 @@ def run_task(env: CodeReviewEnv, task_index: int) -> float:
         task_name = obs.task_id
     except Exception as exc:
         print(f"[START] task={task_name} env={BENCHMARK} model={MODEL_NAME}", flush=True)
-        print(f"[STEP] step=1 action=null reward=0.00 done=false error=env_reset_failed:{exc}", flush=True)
-        print(f"[END] success=false steps=1 rewards=0.00", flush=True)
-        return 0.0
+        print(f"[STEP] step=1 action=null reward=0.01 done=false error=env_reset_failed:{exc}", flush=True)
+        print(f"[END] success=false steps=1 rewards=0.01", flush=True)
+        return 0.01
 
     print(f"[START] task={task_name} env={BENCHMARK} model={MODEL_NAME}", flush=True)
 
@@ -131,7 +131,7 @@ def run_task(env: CodeReviewEnv, task_index: int) -> float:
             step += 1
             action_str = "null"
             error_str = "null"
-            reward = 0.0
+            reward = 0.01  # floor: API/model errors must not log exactly 0.0
 
             # Track whether an assistant turn was committed so we always
             # close it with a user turn — even on validation/step failure.

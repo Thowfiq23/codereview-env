@@ -109,7 +109,7 @@ class CodeReviewEnvironment:
             action_result="Sandbox ready. Run 'pytest tests/' to see what is failing.",
             step_number=self.state.step_count,
             done=False,
-            reward=0.0
+            reward=0.01
         )
 
     def _get_test_pass_rate(self) -> float:

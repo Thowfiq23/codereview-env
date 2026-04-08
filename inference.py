@@ -105,7 +105,7 @@ def run_task(env: CodeReviewEnv, task_index: int) -> float:
     except Exception as exc:
         print(f"[START] task={task_name} env={BENCHMARK} model={MODEL_NAME}", flush=True)
         print(f"[STEP] step=1 action=null reward=0.01 done=false error=env_reset_failed:{exc}", flush=True)
-        print(f"[END] success=false steps=1 rewards=0.01", flush=True)
+        print(f"[END] success=false steps=1 score=0.01 rewards=0.01", flush=True)
         return 0.01
 
     print(f"[START] task={task_name} env={BENCHMARK} model={MODEL_NAME}", flush=True)
@@ -217,15 +217,17 @@ def run_task(env: CodeReviewEnv, task_index: int) -> float:
         print(f"[FATAL] task={task_name} error={str(fatal)[:300]}",
               file=__import__('sys').stderr, flush=True)
 
-    # Score = highest reward achieved during the episode (clamped to [0, 1])
-    score = min(max(max(rewards) if rewards else 0.0, 0.0), 1.0)
+    # Score = highest reward achieved during the episode, strictly in open interval (0, 1).
+    # Evaluator requires score > 0.0 and score < 1.0.
+    raw_score = max(rewards) if rewards else 0.01
+    score = min(max(raw_score, 0.01), 0.99)
     success = score >= 0.5
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
 
-    # [END] format follows the OpenEnv spec exactly:
-    # success steps rewards  — no extra fields (evaluator regex-parses this line)
+    # [END] format follows the OpenEnv spec (sample inference.py):
+    # success steps score rewards  — evaluator regex-parses score= for task scoring
     print(
-        f"[END] success={str(success).lower()} steps={step} rewards={rewards_str}",
+        f"[END] success={str(success).lower()} steps={step} score={score:.2f} rewards={rewards_str}",
         flush=True
     )
 

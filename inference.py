@@ -12,7 +12,7 @@ Required env vars:
 Stdout format (mandatory — exact OpenEnv spec):
   [START] task=<name> env=<benchmark> model=<model>
   [STEP]  step=<n> action=<json> reward=<0.00> done=<true|false> error=<msg|null>
-  [END]   success=<true|false> steps=<n> rewards=<r1,r2,...>
+  [END]   success=<true|false> steps=<n> score=<0.00> rewards=<r1,r2,...>
 """
 
 import os

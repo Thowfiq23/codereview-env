@@ -62,7 +62,7 @@ class CodeReviewEnvironment:
             task_id="",
             step_count=0,
             current_task_index=0,
-            total_reward=0.0,
+            total_reward=0.01,  # floor — never expose exact 0.0
             done=False
         )
         self.current_task_data = None
@@ -98,7 +98,7 @@ class CodeReviewEnvironment:
         self.state.episode_id = str(uuid.uuid4())
         self.state.step_count = 0
         self.state.done = False
-        self.state.total_reward = 0.0
+        self.state.total_reward = 0.01  # floor — never expose exact 0.0
 
         if not self._is_first_reset:
             self.state.current_task_index = (self.state.current_task_index + 1) % len(TASKS)

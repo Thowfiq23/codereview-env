@@ -84,7 +84,7 @@ def run_suite(base_url, label):
         assert obs["task_id"] in valid_tasks, f"Unexpected task_id: {obs['task_id']}"
         assert obs["step_number"] == 0, f"step_number should be 0, got {obs['step_number']}"
         assert obs["done"] == False
-        assert obs["reward"] == 0.0
+        assert obs["reward"] == 0.01
         assert isinstance(obs["available_files"], list) and len(obs["available_files"]) > 0
         record(label, f"POST /reset → CodeObservation ({obs['task_id']})", PASS)
     except Exception as e:
@@ -100,7 +100,7 @@ def run_suite(base_url, label):
         assert state["task_id"] in valid_tasks, f"Unexpected task_id: {state['task_id']}"
         assert state["step_count"] == 0
         assert state["done"] == False
-        assert state["total_reward"] == 0.0
+        assert state["total_reward"] == 0.01
         record(label, f"GET /state → ReviewState (all fields, task={state['task_id']})", PASS)
     except Exception as e:
         record(label, "GET /state → ReviewState (all fields)", FAIL, str(e))
@@ -115,13 +115,13 @@ def run_suite(base_url, label):
             assert field in body, f"Missing field: {field}"
         obs = body["observation"]
         assert obs["step_number"] == 1, f"Expected 1, got {obs['step_number']}"
-        assert body["reward"] == 0.0, f"execute_command should return 0.0 reward, got {body['reward']}"
+        assert body["reward"] == 0.01, f"execute_command should return 0.01 reward (floor), got {body['reward']}"
         assert body["done"] == False
         # Check typed_reward fields
         tr = body["typed_reward"]
         for field in ("value", "is_terminal", "breakdown"):
             assert field in tr, f"typed_reward missing: {field}"
-        assert tr["value"] == 0.0
+        assert tr["value"] == 0.01
         assert tr["is_terminal"] == False
         record(label, "POST /step execute_command → reward=0.0 + typed_reward", PASS)
     except Exception as e:
@@ -138,7 +138,7 @@ def run_suite(base_url, label):
         obs = body["observation"]
         assert "Security Error" in obs["action_result"] or "traversal" in obs["action_result"].lower(), \
             f"Expected security error, got: {obs['action_result']}"
-        assert body["reward"] == 0.0, f"Traversal should give 0 reward, got {body['reward']}"
+        assert body["reward"] == 0.01, f"Traversal should give 0.01 reward (floor), got {body['reward']}"
         record(label, "Security: path traversal blocked (../../etc/passwd)", PASS)
     except Exception as e:
         record(label, "Security: path traversal blocked (../../etc/passwd)", FAIL, str(e))
@@ -184,7 +184,7 @@ def run_suite(base_url, label):
         obs = body["observation"]
         assert "Syntax Error" in obs["action_result"] or "syntax" in obs["action_result"].lower(), \
             f"Expected syntax error feedback, got: {obs['action_result']}"
-        assert body["reward"] == 0.0, f"Syntax error should give 0 reward, got {body['reward']}"
+        assert body["reward"] == 0.01, f"Syntax error should give 0.01 reward (floor), got {body['reward']}"
         record(label, "patch_file: syntax error detected and blocked", PASS)
     except Exception as e:
         record(label, "patch_file: syntax error detected and blocked", FAIL, str(e))
@@ -201,7 +201,7 @@ def run_suite(base_url, label):
         })
         body = r.json()
         reward = body["reward"]
-        assert 0.0 <= reward <= 0.9, f"patch_file reward should be 0..0.9, got {reward}"
+        assert 0.01 <= reward <= 0.89, f"patch_file reward should be in (0,1) open interval, got {reward}"
         record(label, f"patch_file: dense reward in [0, 0.9] = {reward}", PASS)
     except Exception as e:
         record(label, "patch_file: dense reward in [0, 0.9]", FAIL, str(e))
@@ -374,8 +374,8 @@ def run_suite(base_url, label):
         done_val = body["done"]
 
         assert done_val, "submit_review should set done=True"
-        assert final_reward == 1.0, f"Both tests pass, expected 1.0, got {final_reward}"
-        record(label, f"task_2_pr full trajectory: submit_reward={final_reward} (expected 1.0)", PASS)
+        assert final_reward == 0.99, f"Both tests pass, expected 0.99, got {final_reward}"
+        record(label, f"task_2_pr full trajectory: submit_reward={final_reward} (expected 0.99)", PASS)
     except Exception as e:
         record(label, "task_2_pr full trajectory", FAIL, str(e))
         traceback.print_exc()
@@ -424,8 +424,8 @@ def run_suite(base_url, label):
         done_val = body["done"]
 
         assert done_val, "submit_review should set done=True"
-        assert final_reward == 1.0, f"Both tests pass, expected 1.0, got {final_reward}"
-        record(label, f"task_3_pr full trajectory: submit_reward={final_reward} (expected 1.0)", PASS)
+        assert final_reward == 0.99, f"Both tests pass, expected 0.99, got {final_reward}"
+        record(label, f"task_3_pr full trajectory: submit_reward={final_reward} (expected 0.99)", PASS)
     except Exception as e:
         record(label, "task_3_pr full trajectory", FAIL, str(e))
         traceback.print_exc()
@@ -461,7 +461,7 @@ def run_suite(base_url, label):
         })
         body = r.json()
         dense_reward = body["reward"]
-        assert 0.0 < dense_reward <= 0.9, f"Expected dense reward 0..0.9, got {dense_reward}"
+        assert 0.01 <= dense_reward <= 0.89, f"Expected dense reward in (0,1), got {dense_reward}"
 
         # Submit
         r = post(base_url, "/step", {
@@ -473,8 +473,8 @@ def run_suite(base_url, label):
         done_val = body["done"]
 
         assert done_val, "submit_review should set done=True"
-        assert final_reward == 1.0, f"Both tests pass, expected 1.0, got {final_reward}"
-        record(label, f"task_1_pr complete fix: submit_reward={final_reward} (expected 1.0)", PASS)
+        assert final_reward == 0.99, f"Both tests pass, expected 0.99, got {final_reward}"
+        record(label, f"task_1_pr complete fix: submit_reward={final_reward} (expected 0.99)", PASS)
     except Exception as e:
         record(label, "task_1_pr complete fix", FAIL, str(e))
         traceback.print_exc()
@@ -484,8 +484,8 @@ def run_suite(base_url, label):
         state_r = get(base_url, "/state")
         state = state_r.json()
         assert state["done"] == True, f"State.done should be True after submit, got {state['done']}"
-        assert state["total_reward"] == 1.0, f"total_reward should be 1.0, got {state['total_reward']}"
-        record(label, "State consistency: total_reward=1.0 after perfect solve", PASS)
+        assert state["total_reward"] == 0.99, f"total_reward should be 0.99, got {state['total_reward']}"
+        record(label, "State consistency: total_reward=0.99 after perfect solve", PASS)
     except Exception as e:
         record(label, "State consistency: total_reward after perfect solve", FAIL, str(e))
 

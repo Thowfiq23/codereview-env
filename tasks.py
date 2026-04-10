@@ -31,7 +31,7 @@ def test_sql_injection_fixed():
         "(%s or ?) instead of embedding the value directly."
     )
     assert injection_payload not in query, (
-        "Security Error: User input must NOT appear inside the query string — "
+        "Security Error: User input must NOT appear inside the query string -- "
         "it must be passed as a parameter."
     )
     assert injection_payload in str(params), (
@@ -100,7 +100,7 @@ def test_hardcoded_keys():
     )
     # The literal prefix must not appear anywhere in source
     assert 'sk_live_' not in src, (
-        "Security Error: Stripe live key prefix 'sk_live_' found in source — "
+        "Security Error: Stripe live key prefix 'sk_live_' found in source -- "
         "remove it entirely and load from env."
     )
 

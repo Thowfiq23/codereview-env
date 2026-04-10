@@ -113,9 +113,9 @@ def run_task(env: CodeReviewEnv, task_index: int) -> float:
         task_name = obs.task_id
     except Exception as exc:
         print(f"[START] task={task_name} env={BENCHMARK} model={MODEL_NAME}", flush=True)
-        print(f"[STEP] step=1 action=null reward=0.01 done=false error=env_reset_failed:{exc}", flush=True)
-        print(f"[END] success=false steps=1 score=0.01 rewards=0.01", flush=True)
-        return 0.01
+        print(f"[STEP] step=1 action=null reward=0.001 done=false error=env_reset_failed:{exc}", flush=True)
+        print(f"[END] success=false steps=1 score=0.001 rewards=0.001", flush=True)
+        return 0.001
 
     print(f"[START] task={task_name} env={BENCHMARK} model={MODEL_NAME}", flush=True)
 
@@ -227,12 +227,11 @@ def run_task(env: CodeReviewEnv, task_index: int) -> float:
               file=__import__('sys').stderr, flush=True)
 
     # Score = sum(rewards) / MAX_TOTAL_REWARD, matching the spec sample formula.
-    # This penalises inefficient trajectories (many wasted steps, destructive
-    # actions) relative to clean, direct solves.  Clamped to [0.0, 1.0] per
-    # the spec sample script — a catastrophically bad run may legitimately
-    # score 0.0 (e.g. all steps are destructive and sum to negative).
+    # Clamped to (0.001, 0.999) — the hackathon requires scores strictly between
+    # 0 and 1.  0.001 is far lower than the old 0.01 floor so catastrophically
+    # bad runs are not meaningfully inflated, but exact 0.0 and 1.0 are avoided.
     raw_score = sum(rewards) / MAX_TOTAL_REWARD if rewards else 0.0
-    score = min(max(raw_score, 0.0), 1.0)
+    score = min(max(raw_score, 0.001), 0.999)
     success = score >= 0.5
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
 

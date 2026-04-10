@@ -75,7 +75,7 @@ class CodeReviewEnvironment:
         for filepath, content in repo.items():
             full_path = os.path.join(self.workspace_dir, filepath)
             os.makedirs(os.path.dirname(full_path), exist_ok=True)
-            with open(full_path, "w") as f:
+            with open(full_path, "w", encoding="utf-8") as f:
                 f.write(content)
             if filepath.startswith("tests/"):
                 # Make read-only AND store original content.
@@ -104,7 +104,7 @@ class CodeReviewEnvironment:
         for relpath, original in self._test_file_originals.items():
             full_path = os.path.join(self.workspace_dir, relpath)
             try:
-                with open(full_path, "r") as f:
+                with open(full_path, "r", encoding="utf-8") as f:
                     current = f.read()
                 if current == original:
                     continue  # untouched — fast path
@@ -117,9 +117,27 @@ class CodeReviewEnvironment:
             except OSError:
                 pass
             os.makedirs(os.path.dirname(full_path), exist_ok=True)
-            with open(full_path, "w") as f:
+            with open(full_path, "w", encoding="utf-8") as f:
                 f.write(original)
             os.chmod(full_path, 0o444)
+
+        # Remove extra files created under tests/ that were not present at
+        # episode start.  An agent can write tests/conftest.py via the shell
+        # to inject fixtures that make broken tests appear to pass.
+        tests_dir = os.path.join(self.workspace_dir, "tests")
+        if os.path.isdir(tests_dir):
+            tracked_abs = {
+                os.path.normpath(os.path.join(self.workspace_dir, p))
+                for p in self._test_file_originals
+            }
+            for dirpath, _, filenames in os.walk(tests_dir):
+                for fname in filenames:
+                    fpath = os.path.normpath(os.path.join(dirpath, fname))
+                    if fpath not in tracked_abs:
+                        try:
+                            os.remove(fpath)
+                        except OSError:
+                            pass
 
     def reset(self, task_id: Optional[str] = None) -> CodeObservation:
         """
@@ -286,7 +304,8 @@ class CodeReviewEnvironment:
                         if full_path.endswith(".py"):
                             try:
                                 with tempfile.NamedTemporaryFile(
-                                    mode="w", suffix=".py", delete=False
+                                    mode="w", suffix=".py", delete=False,
+                                    encoding="utf-8"
                                 ) as tmp:
                                     tmp.write(new_content)
                                     tmp_path = tmp.name
@@ -299,7 +318,7 @@ class CodeReviewEnvironment:
                                 full_path = None
 
                         if full_path is not None and not obs_result:
-                            with open(full_path, "w") as f:
+                            with open(full_path, "w", encoding="utf-8") as f:
                                 f.write(new_content)
                             obs_result = f"Successfully patched: {target}"
 

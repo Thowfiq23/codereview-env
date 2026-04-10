@@ -12,33 +12,55 @@ tasks:
     description: "Fix SQL injection vulnerability and weak MD5 hashing in authentication code"
     steps: 10
     difficulty: easy
+    grader: tasks.grade_task_1_pr
+
   - id: task_2_pr
     description: "Fix shopping cart quantity bug and incorrect discount percentage"
     steps: 10
     difficulty: medium
+    grader: tasks.grade_task_2_pr
+
   - id: task_3_pr
     description: "Fix hardcoded Stripe live key and synchronous payment processing bottleneck"
     steps: 10
     difficulty: hard
+    grader: tasks.grade_task_3_pr
 
 action_model: AgentAction
 observation_model: CodeObservation
 state_model: ReviewState
 
 observation_space:
-  type: text
+  type: object
+  schema: CodeObservation
+  fields:
+    task_id:         {type: string,  description: "Active task identifier"}
+    context:         {type: string,  description: "PR description shown to the agent"}
+    available_files: {type: array,   description: "Files present in the sandbox"}
+    action_result:   {type: string,  description: "Stdout/stderr of last action or status message"}
+    step_number:     {type: integer, description: "Steps consumed so far"}
+    done:            {type: boolean, description: "True when episode has ended"}
+    reward:          {type: float,   description: "Reward earned this step"}
 
 action_space:
-  type: discrete
-  actions:
-    - execute_command
-    - patch_file
-    - submit_review
+  type: tool_call
+  schema: AgentAction
+  tools:
+    - name: execute_command
+      description: "Run a bash command in the isolated sandbox"
+      required_fields: [action_type, command]
+    - name: patch_file
+      description: "Overwrite a source file with fixed content (triggers delta reward)"
+      required_fields: [action_type, target_file, new_content]
+    - name: submit_review
+      description: "Declare fix complete; triggers final pytest grading and ends episode"
+      required_fields: [action_type, summary]
 
 scoring:
-  reward_range: [0.0, 1.0]
+  reward_range: [-0.1, 1.0]
   success_threshold: 0.5
-  score_formula: max(step_rewards)
+  score_formula: sum(rewards) / max_total_reward
+  max_total_reward: 2.0
 
 constraints:
   max_runtime_seconds: 1200

@@ -1,4 +1,8 @@
-from typing import List, Dict, Any
+import re
+import subprocess
+import os
+from typing import List, Dict, Any, Callable
+
 
 TASKS: List[Dict[str, Any]] = [
     {
@@ -13,12 +17,41 @@ from auth.crypto import hash_password
 import inspect
 
 def test_sql_injection_fixed():
-    query = get_user_query('admin')
-    assert '%s' in str(query) or '?' in str(query), "Security Error: Code is still vulnerable to SQL Injection (use %s or ?)"
+    # Use a payload that contains SQL metacharacters to prove parameterization
+    injection_payload = "admin'; DROP TABLE users; --"
+    result = get_user_query(injection_payload)
+    assert isinstance(result, tuple) and len(result) == 2, (
+        "Security Error: get_user_query must return a (query, params) tuple, "
+        "not a plain string."
+    )
+    query, params = result
+    assert '%s' in query or '?' in query, (
+        "Security Error: Query string must contain a parameterized placeholder "
+        "(%s or ?) instead of embedding the value directly."
+    )
+    assert injection_payload not in query, (
+        "Security Error: User input must NOT appear inside the query string — "
+        "it must be passed as a parameter."
+    )
+    assert injection_payload in str(params), (
+        "Security Error: User input must be present in the params argument, "
+        "not embedded in the query string."
+    )
 
 def test_crypto_fixed():
     source = inspect.getsource(hash_password)
-    assert 'md5' not in source.lower(), "Security Error: Weak MD5 hashing is still being used."
+    assert 'md5' not in source.lower(), (
+        "Security Error: Weak MD5 hashing is still being used."
+    )
+    # Verify the function actually produces output
+    h = hash_password("testpassword")
+    assert isinstance(h, str) and len(h) >= 32, (
+        "Security Error: hash_password must return a hex string of at least 32 chars."
+    )
+    # Verify different inputs produce different hashes (no trivial stub)
+    assert hash_password("password_a") != hash_password("password_b"), (
+        "Security Error: hash_password must produce unique hashes for different inputs."
+    )
 """
         }
     },
@@ -50,13 +83,28 @@ def test_discount():
             "payments/processor.py": "import time\n\ndef process_payment(user_id, amount):\n    time.sleep(5)\n    return True\n",
             "tests/test_payments.py": """
 from payments.config import STRIPE_LIVE_KEY
-from payments.processor import process_payment
 import inspect
 
 def test_hardcoded_keys():
-    assert not STRIPE_LIVE_KEY or 'sk_live_' not in STRIPE_LIVE_KEY, "Security Error: Hardcoded live Stripe key found in config.py!"
+    # No hardcoded sk_live_ value may remain
+    assert not STRIPE_LIVE_KEY or 'sk_live_' not in str(STRIPE_LIVE_KEY), (
+        "Security Error: Hardcoded live Stripe key found in config.py!"
+    )
+    # Must use os.getenv (not just delete the variable)
+    import payments.config as cfg_module
+    src = inspect.getsource(cfg_module)
+    assert 'os.getenv' in src or 'os.environ' in src, (
+        "Security Error: STRIPE_LIVE_KEY must be loaded from the environment "
+        "via os.getenv() or os.environ, not hardcoded or simply deleted."
+    )
+    # The literal prefix must not appear anywhere in source
+    assert 'sk_live_' not in src, (
+        "Security Error: Stripe live key prefix 'sk_live_' found in source — "
+        "remove it entirely and load from env."
+    )
 
 def test_performance():
+    from payments.processor import process_payment
     import ast
     source = inspect.getsource(process_payment)
     try:
@@ -75,11 +123,100 @@ def test_performance():
     }
 ]
 
+
 def get_task(task_id: str) -> Dict[str, Any]:
     for t in TASKS:
         if t["task_id"] == task_id:
             return t
     raise ValueError(f"Task {task_id} not found")
 
+
 def list_task_ids() -> List[str]:
     return [t["task_id"] for t in TASKS]
+
+
+# ---------------------------------------------------------------------------
+# Per-task grader functions
+# ---------------------------------------------------------------------------
+# Each grader accepts a workspace_dir (path to the episode sandbox) and
+# returns a float in [0.0, 1.0] representing the fraction of tests passing.
+# The environment calls these via the GRADERS dispatch table so that each
+# task has an explicit, named, importable grader — not a single anonymous
+# shared method.
+# ---------------------------------------------------------------------------
+
+def _run_pytest(workspace_dir: str) -> float:
+    """
+    Shared pytest runner used by all graders.
+    Returns the fraction of tests passing in workspace_dir (0.0–1.0).
+    Uses a minimal clean environment so server credentials are not exposed.
+    """
+    env = {k: v for k, v in os.environ.items() if k in {"PATH", "HOME", "LANG", "LC_ALL"}}
+    env["PYTHONPATH"] = workspace_dir
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    if "PATH" not in env:
+        env["PATH"] = "/usr/local/bin:/usr/bin:/bin"
+
+    try:
+        result = subprocess.run(
+            "pytest tests/ --disable-warnings -v",
+            cwd=workspace_dir, shell=True,
+            capture_output=True, text=True, timeout=15, env=env
+        )
+        if result.returncode == 0:
+            return 1.0
+
+        output = result.stdout + result.stderr
+        n_passed = sum(1 for line in output.splitlines() if " PASSED" in line)
+        n_failed = sum(1 for line in output.splitlines() if " FAILED" in line or " ERROR" in line)
+        total = n_passed + n_failed
+        if total > 0:
+            return n_passed / total
+
+        # Fallback: parse summary line e.g. "1 failed, 1 passed in 0.12s"
+        m_pass = re.search(r"(\d+) passed", output)
+        m_fail = re.search(r"(\d+) failed", output)
+        p = int(m_pass.group(1)) if m_pass else 0
+        f = int(m_fail.group(1)) if m_fail else 0
+        return p / (p + f) if (p + f) > 0 else 0.0
+
+    except Exception:
+        return 0.0
+
+
+def grade_task_1_pr(workspace_dir: str) -> float:
+    """
+    Grader for task_1_pr — Security Audit.
+    Checks:
+      - get_user_query returns a (query, params) tuple with the user input in params
+      - hash_password does not use MD5 and produces valid, unique hashes
+    """
+    return _run_pytest(workspace_dir)
+
+
+def grade_task_2_pr(workspace_dir: str) -> float:
+    """
+    Grader for task_2_pr — Billing Logic.
+    Checks:
+      - calculate_total multiplies price × quantity before summing
+      - apply_discount keeps 80% of the amount (not 20%)
+    """
+    return _run_pytest(workspace_dir)
+
+
+def grade_task_3_pr(workspace_dir: str) -> float:
+    """
+    Grader for task_3_pr — Stripe Security + Async Performance.
+    Checks:
+      - STRIPE_LIVE_KEY loaded via os.getenv, no literal sk_live_ in source
+      - process_payment is declared async def with an await expression
+    """
+    return _run_pytest(workspace_dir)
+
+
+# Dispatch table: maps task_id → grader callable(workspace_dir) → float
+GRADERS: Dict[str, Callable[[str], float]] = {
+    "task_1_pr": grade_task_1_pr,
+    "task_2_pr": grade_task_2_pr,
+    "task_3_pr": grade_task_3_pr,
+}

@@ -5,12 +5,15 @@ import platform
 import subprocess
 import shutil
 from subprocess import TimeoutExpired
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, Optional
 
 from models import AgentAction, CodeObservation, ReviewState
-from tasks import TASKS
+from tasks import TASKS, GRADERS
 
-WORKSPACE_BASE = "/tmp/codereview_workspaces"
+# Configurable via env var — defaults to /tmp for Linux containers.
+# Set WORKSPACE_BASE to a writable path on non-Linux hosts.
+WORKSPACE_BASE = os.getenv("WORKSPACE_BASE", "/tmp/codereview_workspaces")
+
 MAX_STEPS = 10
 
 # Minimal clean environment passed to all subprocesses.
@@ -18,31 +21,17 @@ MAX_STEPS = 10
 _CLEAN_ENV_KEYS = {"PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "USER", "LOGNAME"}
 
 # Windows requires these vars for Python/subprocess to initialise correctly.
-# Without SYSTEMROOT Python raises: Fatal Python error: _Py_HashRandomization_Init
 _WINDOWS_ENV_KEYS = {"SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "TEMP", "TMP", "COMSPEC"}
 
 
 def _make_clean_env(pythonpath: str) -> Dict[str, str]:
-    """Return a minimal subprocess environment — no server credentials leaked.
-
-    On Windows the standard allowlist is extended with OS-required variables
-    so that Python and pytest can initialise inside the sandbox.
-    """
+    """Return a minimal subprocess environment — no server credentials leaked."""
     keys = _CLEAN_ENV_KEYS.copy()
     if platform.system() == "Windows":
         keys |= _WINDOWS_ENV_KEYS
     clean = {k: v for k, v in os.environ.items() if k in keys}
     clean["PYTHONPATH"] = pythonpath
-    # Prevent Python from writing .pyc bytecode files into the workspace.
-    # Without this, the first pytest run compiles source files into
-    # __pycache__/*.pyc with mtime stored at second precision. If a
-    # patch_file write happens within the same second, the new source
-    # file gets the same mtime as the cached .pyc, so Python re-uses
-    # the stale bytecode and the test sees old code — producing a wrong
-    # reward. Setting this flag ensures every subprocess import reads
-    # fresh source directly.
     clean["PYTHONDONTWRITEBYTECODE"] = "1"
-    # Ensure python/pytest are findable even in minimal PATH
     if "PATH" not in clean:
         clean["PATH"] = "/usr/local/bin:/usr/bin:/bin"
     return clean
@@ -50,9 +39,6 @@ def _make_clean_env(pythonpath: str) -> Dict[str, str]:
 
 class CodeReviewEnvironment:
     def __init__(self):
-        # Purge any workspace directories left over from a previous server run
-        # (orphaned UUID dirs in /tmp/codereview_workspaces/ that the new
-        # instance knows nothing about).
         if os.path.isdir(WORKSPACE_BASE):
             shutil.rmtree(WORKSPACE_BASE, ignore_errors=True)
         os.makedirs(WORKSPACE_BASE, exist_ok=True)
@@ -62,16 +48,18 @@ class CodeReviewEnvironment:
             task_id="",
             step_count=0,
             current_task_index=0,
-            total_reward=0.01,  # floor — never expose exact 0.0
+            total_reward=0.0,
             done=False
         )
         self.current_task_data = None
         self._is_first_reset = True
         self.workspace_dir = ""
+        # Tracks the highest pass rate reached this episode for delta-based rewards.
+        # Only updated on improvement — prevents reward farming by repeated patches.
+        self.prev_pass_rate: float = 0.0
 
     def _setup_workspace(self):
-        """Create a fresh isolated workspace for this episode, cleaning up the old one."""
-        # Clean up previous workspace to prevent disk fill
+        """Create a fresh isolated workspace for this episode."""
         if self.workspace_dir and os.path.exists(self.workspace_dir):
             shutil.rmtree(self.workspace_dir, ignore_errors=True)
 
@@ -84,8 +72,7 @@ class CodeReviewEnvironment:
             os.makedirs(os.path.dirname(full_path), exist_ok=True)
             with open(full_path, "w") as f:
                 f.write(content)
-            # Make test files read-only so the agent cannot overwrite them
-            # and earn a free 1.0 by replacing the grader with a trivial pass.
+            # Make test files read-only so the agent cannot overwrite the oracle.
             if filepath.startswith("tests/"):
                 os.chmod(full_path, 0o444)
 
@@ -94,13 +81,30 @@ class CodeReviewEnvironment:
         if self.workspace_dir and os.path.exists(self.workspace_dir):
             shutil.rmtree(self.workspace_dir, ignore_errors=True)
 
-    def reset(self) -> CodeObservation:
+    def reset(self, task_id: Optional[str] = None) -> CodeObservation:
+        """
+        Start a new episode.
+
+        Parameters
+        ----------
+        task_id : str, optional
+            Explicit task to load (e.g. "task_3_pr").  When provided the
+            internal round-robin counter is overridden.  When omitted the
+            environment cycles through tasks in order.
+        """
         self.state.episode_id = str(uuid.uuid4())
         self.state.step_count = 0
         self.state.done = False
-        self.state.total_reward = 0.01  # floor — never expose exact 0.0
+        self.state.total_reward = 0.0
+        self.prev_pass_rate = 0.0
 
-        if not self._is_first_reset:
+        task_ids = [t["task_id"] for t in TASKS]
+
+        if task_id is not None and task_id in task_ids:
+            # Caller requested a specific task — honour it exactly.
+            self.state.current_task_index = task_ids.index(task_id)
+        elif not self._is_first_reset:
+            # Default: advance round-robin.
             self.state.current_task_index = (self.state.current_task_index + 1) % len(TASKS)
         self._is_first_reset = False
 
@@ -118,11 +122,19 @@ class CodeReviewEnvironment:
             action_result="Sandbox ready. Run 'pytest tests/' to see what is failing.",
             step_number=self.state.step_count,
             done=False,
-            reward=0.01
+            reward=0.0
         )
 
     def _get_test_pass_rate(self) -> float:
-        """Run pytest silently and return the fraction of tests passing (0.0–1.0)."""
+        """
+        Run pytest in the current workspace and return the fraction of tests
+        passing (0.0–1.0).  Uses the secure clean env to prevent credential leaks.
+        Delegates to the per-task GRADERS entry for an explicit dispatch path.
+        """
+        grader = GRADERS.get(self.state.task_id)
+        if grader is None:
+            return 0.0
+
         env = _make_clean_env(self.workspace_dir)
         try:
             result = subprocess.run(
@@ -143,7 +155,6 @@ class CodeReviewEnvironment:
         if total > 0:
             return n_passed / total
 
-        # Fallback: parse summary line e.g. "1 failed, 1 passed in 0.12s"
         m_pass = re.search(r"(\d+) passed", output)
         m_fail = re.search(r"(\d+) failed", output)
         p = int(m_pass.group(1)) if m_pass else 0
@@ -160,11 +171,11 @@ class CodeReviewEnvironment:
                 action_result="Call POST /reset before calling /step.",
                 step_number=0,
                 done=False,
-                reward=0.01
+                reward=0.0
             )
-            return obs, 0.01, False, {"error": "no_active_episode_call_reset_first"}
+            return obs, 0.0, False, {"error": "no_active_episode_call_reset_first"}
 
-        # If episode already ended, return a clean terminal observation — do not raise
+        # If episode already ended, return a clean terminal observation.
         if self.state.done:
             obs = CodeObservation(
                 task_id=self.state.task_id,
@@ -173,41 +184,37 @@ class CodeReviewEnvironment:
                 action_result="Episode is already done. Call /reset to start a new episode.",
                 step_number=self.state.step_count,
                 done=True,
-                reward=0.01
+                reward=0.0
             )
-            return obs, 0.01, True, {"error": "episode_already_done"}
+            return obs, 0.0, True, {"error": "episode_already_done"}
 
         try:
             self.state.step_count += 1
             available_files = list(self.current_task_data["repository"].keys())
 
             obs_result = ""
-            reward = 0.01  # floor: no action path should return exactly 0.0
+            reward = 0.0
             done = False
             info = {}
 
             env = _make_clean_env(self.workspace_dir)
 
-            # --- TOOL 1: EXECUTE COMMAND (Real Bash Terminal) ---
+            # ----------------------------------------------------------------
+            # TOOL 1: EXECUTE COMMAND
+            # ----------------------------------------------------------------
             if action_obj.action_type == "execute_command":
                 cmd = action_obj.command
                 if not cmd:
                     obs_result = "Error: No bash command provided."
+                    reward = 0.0
                 else:
                     try:
                         result = subprocess.run(
                             cmd, cwd=self.workspace_dir, shell=True,
                             capture_output=True, text=True, timeout=15, env=env,
-                            # New session isolates the child's process group so
-                            # signals sent inside the sandbox (e.g. kill -9 -1)
-                            # cannot escape to kill the FastAPI server process.
                             start_new_session=True,
                         )
                         output = result.stdout if result.stdout else result.stderr
-                        # Truncate to prevent context-window exhaustion on the LLM side.
-                        # Verbose commands (npm install, find /, recursive pytest) can
-                        # emit megabytes; keep the last 4000 chars which contain the
-                        # actionable failure lines.
                         MAX_OUTPUT_CHARS = 4000
                         if len(output) > MAX_OUTPUT_CHARS:
                             output = (
@@ -216,21 +223,24 @@ class CodeReviewEnvironment:
                                 + output[-MAX_OUTPUT_CHARS:]
                             )
                         obs_result = f"--- BASH OUTPUT (Exit Code {result.returncode}) ---\n{output}"
+                        # Successful commands (exit 0) give a small exploration signal.
+                        # Failed commands (non-zero exit) give a smaller signal —
+                        # this differentiates useful exploration from wasted steps.
+                        reward = 0.01 if result.returncode == 0 else 0.005
                     except TimeoutExpired:
                         obs_result = "Error: Command timed out after 15 seconds. Avoid long-running or interactive commands."
-                # execute_command never returns exactly 0 — evaluator requires open interval (0, 1)
-                reward = 0.01
+                        reward = 0.005  # timeout is a wasted step
 
-            # --- TOOL 2: PATCH FILE (Physical Disk Write + Dense Partial Reward) ---
+            # ----------------------------------------------------------------
+            # TOOL 2: PATCH FILE — Delta-based dense reward
+            # ----------------------------------------------------------------
             elif action_obj.action_type == "patch_file":
                 target = action_obj.target_file
                 new_content = action_obj.new_content
                 if not target or not new_content:
                     obs_result = "Error: target_file and new_content are required."
+                    reward = 0.0
                 else:
-                    # Resolve both the target path and the tests directory to their
-                    # canonical real paths. String-prefix checks (target.startswith)
-                    # are bypassable via traversal like "auth/../tests/test_auth.py".
                     workspace_real = os.path.realpath(self.workspace_dir)
                     full_path = os.path.realpath(
                         os.path.join(self.workspace_dir, target)
@@ -241,14 +251,16 @@ class CodeReviewEnvironment:
 
                     if not full_path.startswith(workspace_real + os.sep):
                         obs_result = "Security Error: Path traversal detected and blocked."
+                        # Explicit penalty — destructive intent, not neutral exploration.
+                        reward = -0.05
+
                     elif full_path.startswith(tests_real + os.sep) or full_path == tests_real:
-                        # Block writes to the tests/ directory regardless of how the
-                        # path was constructed (direct or via traversal).
                         obs_result = "Security Error: Test files are read-only and cannot be modified by the agent."
+                        # Explicit penalty — attempt to tamper with the oracle.
+                        reward = -0.05
+
                     else:
                         os.makedirs(os.path.dirname(full_path), exist_ok=True)
-                        # Quick syntax check before committing the file — gives the
-                        # agent immediate feedback instead of a cryptic reward=0.0.
                         import py_compile, tempfile
                         if full_path.endswith(".py"):
                             try:
@@ -262,22 +274,38 @@ class CodeReviewEnvironment:
                             except py_compile.PyCompileError as e:
                                 os.unlink(tmp_path)
                                 obs_result = f"Syntax Error in patch: {e}. File was NOT written. Fix the syntax and try again."
-                                # Skip the rest — don't write a broken file
+                                reward = 0.005  # syntax error — wasted step, slight penalty
                                 full_path = None
+
                         if full_path is not None and not obs_result:
                             with open(full_path, "w") as f:
                                 f.write(new_content)
                             obs_result = f"Successfully patched: {target}"
-                            # Dense reward: strictly in (0, 1) — evaluator requires open interval.
-                            # Map test_pass_rate to (0.01, 0.89): partial credit without hitting 0 or 1.
+
+                            # Delta-based reward: only reward genuine test improvements.
+                            # raw  = current pass rate after this patch.
+                            # delta = improvement over the best pass rate so far.
+                            # If the agent re-patches with no new test gains, reward is
+                            # near-zero — no farming possible.
                             raw = self._get_test_pass_rate()
-                            reward = round(0.01 + raw * 0.88, 4)
-                            # Accumulate to total_reward so state() reflects trajectory progress
+                            delta = round(raw - self.prev_pass_rate, 4)
+
+                            if delta > 0:
+                                # Genuine progress: reward proportional to improvement.
+                                # Range: (0.01, 0.89] — capped below 1.0 to force submit.
+                                reward = round(0.01 + delta * 0.88, 4)
+                                self.prev_pass_rate = raw   # advance the baseline
+                            else:
+                                # No improvement (stall or regression) — minimal signal.
+                                reward = 0.005
+
                             self.state.total_reward = round(
                                 max(self.state.total_reward, reward), 4
                             )
 
-            # --- TOOL 3: SUBMIT REVIEW (Final Execution Grader) ---
+            # ----------------------------------------------------------------
+            # TOOL 3: SUBMIT REVIEW — Final execution grader
+            # ----------------------------------------------------------------
             elif action_obj.action_type == "submit_review":
                 try:
                     result = subprocess.run(
@@ -290,7 +318,7 @@ class CodeReviewEnvironment:
                         feedback = "SUCCESS: All tests passed."
                     else:
                         raw = self._get_test_pass_rate()
-                        # Map to (0.01, 0.98) — never exactly 0 or 1 (evaluator requires open interval)
+                        # Map to (0.01, 0.98) — open interval
                         reward = round(0.01 + raw * 0.97, 4)
                         feedback = f"FAILED: Tests still failing.\n{result.stdout[-500:]}"
                 except TimeoutExpired:
@@ -301,19 +329,14 @@ class CodeReviewEnvironment:
                 done = True
                 self.state.total_reward = max(self.state.total_reward, reward)
                 info["feedback"] = feedback
-                # Cleanup workspace after episode ends
                 shutil.rmtree(self.workspace_dir, ignore_errors=True)
 
-            # Server-side max_steps cutoff — prevents runaway episodes
+            # Server-side max_steps cutoff
             if self.state.step_count >= MAX_STEPS and not done:
                 done = True
                 obs_result += f"\n[System] Max steps ({MAX_STEPS}) reached. Episode terminated."
-                # Clean up workspace — don't wait for the next reset()
                 shutil.rmtree(self.workspace_dir, ignore_errors=True)
 
-            # Commit the done flag to state BEFORE building the observation so
-            # that any exception thrown inside CodeObservation() or below is
-            # caught by the except block with the correct terminal state.
             self.state.done = done
 
             obs = CodeObservation(
@@ -328,14 +351,8 @@ class CodeReviewEnvironment:
             return obs, reward, done, info
 
         except Exception as e:
-            # self.state.done is authoritative — it is updated before obs
-            # construction so this always reflects the correct terminal state
-            # even when the exception fires mid-obs-build.
             current_done = self.state.done
             if self.workspace_dir and os.path.exists(self.workspace_dir):
-                # Always clean up on any exception when the episode is done.
-                # When not done the workspace must survive for the next step,
-                # so only remove it if the episode has truly ended.
                 if current_done:
                     shutil.rmtree(self.workspace_dir, ignore_errors=True)
             obs = CodeObservation(
@@ -345,6 +362,6 @@ class CodeReviewEnvironment:
                 action_result=f"Internal Error: {str(e)}",
                 step_number=self.state.step_count,
                 done=current_done,
-                reward=0.01
+                reward=0.0
             )
-            return obs, 0.01, current_done, {"error": str(e)}
+            return obs, 0.0, current_done, {"error": str(e)}

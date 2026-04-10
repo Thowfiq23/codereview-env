@@ -49,9 +49,14 @@ if HF_TOKEN is None:
     raise ValueError("HF_TOKEN environment variable is required")
 API_KEY      = HF_TOKEN
 ENV_URL      = os.getenv("ENV_URL", "http://localhost:7860")
-BENCHMARK    = "codereview-env"
-MAX_STEPS    = 10
-TEMPERATURE  = 0.0
+BENCHMARK        = "codereview-env"
+MAX_STEPS        = 10
+TEMPERATURE      = 0.0
+# Upper bound for score normalisation.  A perfect efficient episode (one
+# explore + two patch steps + submit) sums to roughly 1.9 in rewards.
+# Using 2.0 keeps scores in a natural range and penalises inefficient
+# trajectories (many wasted steps) relative to efficient ones.
+MAX_TOTAL_REWARD = 2.0
 
 client = OpenAI(api_key=API_KEY, base_url=API_BASE_URL)
 
@@ -217,9 +222,11 @@ def run_task(env: CodeReviewEnv, task_index: int) -> float:
         print(f"[FATAL] task={task_name} error={str(fatal)[:300]}",
               file=__import__('sys').stderr, flush=True)
 
-    # Score = highest reward achieved during the episode, strictly in open interval (0, 1).
-    # Evaluator requires score > 0.0 and score < 1.0.
-    raw_score = max(rewards) if rewards else 0.01
+    # Score = sum(rewards) / MAX_TOTAL_REWARD, matching the spec sample formula.
+    # This penalises inefficient trajectories (many wasted steps, destructive
+    # actions) relative to clean, direct solves.  Clamped to (0.01, 0.99) so
+    # the evaluator always sees a score in the open interval (0, 1).
+    raw_score = sum(rewards) / MAX_TOTAL_REWARD if rewards else 0.0
     score = min(max(raw_score, 0.01), 0.99)
     success = score >= 0.5
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)

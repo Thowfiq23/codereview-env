@@ -126,9 +126,27 @@ async def get_tasks() -> Dict[str, list]:
 
 
 @app.post("/reset", response_model=CodeObservation)
-async def reset_env() -> CodeObservation:
+async def reset_env(request: Request) -> CodeObservation:
+    """
+    Start a new episode.  Accepts an optional JSON body::
+
+        {"task_id": "task_3_pr"}
+
+    When ``task_id`` is provided the environment loads that specific task
+    instead of advancing the internal round-robin counter.  Omitting the
+    body (or sending ``{}``) keeps the default cycling behaviour.
+    """
+    task_id = None
+    try:
+        body_bytes = await request.body()
+        if body_bytes:
+            body = json.loads(body_bytes)
+            if isinstance(body, dict):
+                task_id = body.get("task_id")
+    except Exception:
+        task_id = None
     async with _env_lock:
-        return env.reset()
+        return env.reset(task_id=task_id)
 
 
 @app.post("/step")

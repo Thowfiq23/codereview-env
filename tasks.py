@@ -1,6 +1,7 @@
 import re
 import subprocess
 import os
+import platform
 from typing import List, Dict, Any, Callable
 
 
@@ -145,13 +146,23 @@ def list_task_ids() -> List[str]:
 # shared method.
 # ---------------------------------------------------------------------------
 
+_CLEAN_ENV_KEYS = {"PATH", "HOME", "LANG", "LC_ALL"}
+# Windows requires these for Python to initialise at all.
+# Without SYSTEMROOT Python raises: Fatal Python error: _Py_HashRandomization_Init
+_WINDOWS_ENV_KEYS = {"SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "TEMP", "TMP", "COMSPEC"}
+
+
 def _run_pytest(workspace_dir: str) -> float:
     """
     Shared pytest runner used by all graders.
     Returns the fraction of tests passing in workspace_dir (0.0–1.0).
-    Uses a minimal clean environment so server credentials are not exposed.
+    Uses a minimal clean environment so server credentials are not exposed,
+    with platform-aware key allowlist so Windows hosts work correctly.
     """
-    env = {k: v for k, v in os.environ.items() if k in {"PATH", "HOME", "LANG", "LC_ALL"}}
+    keys = _CLEAN_ENV_KEYS.copy()
+    if platform.system() == "Windows":
+        keys |= _WINDOWS_ENV_KEYS
+    env = {k: v for k, v in os.environ.items() if k in keys}
     env["PYTHONPATH"] = workspace_dir
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     if "PATH" not in env:

@@ -166,11 +166,17 @@ async def step_env(request: Request) -> Dict[str, Any]:
     async with _env_lock:
         obs, reward, done, info = env.step(action_obj)
 
-    # Include typed EpisodeReward in the response to satisfy OpenEnv spec
+    # Include typed EpisodeReward in the response to satisfy OpenEnv spec.
+    # breakdown now separates the actual test pass rate (0.0–1.0, from info)
+    # from the shaped step reward so they are not conflated.
+    test_pass_rate = float(info.get("test_pass_rate", 0.0)) if info else 0.0
     typed_reward = EpisodeReward(
         value=round(float(reward), 4),
         is_terminal=bool(done),
-        breakdown={"test_pass_rate": round(float(reward), 4)},
+        breakdown={
+            "test_pass_rate": round(test_pass_rate, 4),
+            "shaped_reward":  round(float(reward), 4),
+        },
     )
 
     return {

@@ -37,16 +37,16 @@ class CodeObservation(BaseModel):
     action_result:   str        = Field(..., description="Stdout/stderr of the last command, or a status message")
     step_number:     int        = Field(..., description="Number of steps taken so far in this episode")
     done:            bool       = Field(..., description="True when the episode has ended")
-    reward:          float      = Field(..., description="Reward earned this step [0.0, 1.0]")
+    reward:          float      = Field(..., description="Reward earned this step. Range: [-0.1, 1.0]. Negative for destructive actions (path traversal, test tampering).")
 
 
 class EpisodeReward(BaseModel):
     """Typed reward model as required by OpenEnv spec."""
-    value:       float            = Field(..., ge=0.0, le=1.0, description="Scalar reward [0.0, 1.0]")
-    is_terminal: bool             = Field(False,              description="True if this reward ends the episode")
+    value:       float            = Field(..., description="Scalar reward in [-0.1, 1.0]. Negative values signal destructive actions.")
+    is_terminal: bool             = Field(False, description="True if this reward ends the episode")
     breakdown:   Dict[str, float] = Field(
         default_factory=dict,
-        description="Per-component breakdown, e.g. {'test_pass_rate': 0.5}"
+        description="Per-component breakdown: test_pass_rate (0.0–1.0) and shaped_reward (the actual step reward)."
     )
 
 

@@ -10,8 +10,22 @@ class CodeReviewEnv:
     def __init__(self, base_url: str = "http://localhost:7860"):
         self.base_url = base_url.rstrip("/")
 
-    def reset(self) -> CodeObservation:
-        response = requests.post(f"{self.base_url}/reset", timeout=30)
+    def reset(self, task_id: str = None) -> CodeObservation:
+        """
+        Start a new episode.
+
+        Parameters
+        ----------
+        task_id : str, optional
+            Specific task to load (e.g. ``"task_3_pr"``).  When omitted the
+            server cycles tasks in round-robin order.
+        """
+        payload = {"task_id": task_id} if task_id else {}
+        response = requests.post(
+            f"{self.base_url}/reset",
+            json=payload,
+            timeout=30,
+        )
         response.raise_for_status()
         return CodeObservation.model_validate(response.json())
 

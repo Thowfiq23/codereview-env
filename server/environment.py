@@ -57,6 +57,10 @@ class CodeReviewEnvironment:
         # Tracks the highest pass rate reached this episode for delta-based rewards.
         # Only updated on improvement — prevents reward farming by repeated patches.
         self.prev_pass_rate: float = 0.0
+        # Original test file contents keyed by relative path.
+        # Used by _enforce_test_integrity() to restore files after every
+        # execute_command — chmod 444 alone is bypassable via the shell.
+        self._test_file_originals: Dict[str, str] = {}
 
     def _setup_workspace(self):
         """Create a fresh isolated workspace for this episode."""
@@ -66,20 +70,56 @@ class CodeReviewEnvironment:
         self.workspace_dir = os.path.join(WORKSPACE_BASE, self.state.episode_id)
         os.makedirs(self.workspace_dir, exist_ok=True)
 
+        self._test_file_originals = {}
         repo = self.current_task_data["repository"]
         for filepath, content in repo.items():
             full_path = os.path.join(self.workspace_dir, filepath)
             os.makedirs(os.path.dirname(full_path), exist_ok=True)
             with open(full_path, "w") as f:
                 f.write(content)
-            # Make test files read-only so the agent cannot overwrite the oracle.
             if filepath.startswith("tests/"):
+                # Make read-only AND store original content.
+                # chmod 444 alone is bypassable via shell ('chmod +w …').
+                # _enforce_test_integrity() restores from this dict after
+                # every execute_command, closing that shell bypass.
                 os.chmod(full_path, 0o444)
+                self._test_file_originals[filepath] = content
 
     def cleanup(self):
         """Explicitly remove the current workspace. Called on server shutdown."""
         if self.workspace_dir and os.path.exists(self.workspace_dir):
             shutil.rmtree(self.workspace_dir, ignore_errors=True)
+
+    def _enforce_test_integrity(self) -> None:
+        """
+        Restore any test files modified or deleted by a shell command.
+
+        chmod 444 only prevents direct writes through open(); an agent using
+        execute_command can still run 'chmod +w tests/...' followed by an
+        echo redirect or a Python one-liner to overwrite the oracle.  This
+        method compares every test file against its original content and
+        rewrites + re-locks any that differ, closing that bypass completely.
+        Called unconditionally after every execute_command.
+        """
+        for relpath, original in self._test_file_originals.items():
+            full_path = os.path.join(self.workspace_dir, relpath)
+            try:
+                with open(full_path, "r") as f:
+                    current = f.read()
+                if current == original:
+                    continue  # untouched — fast path
+            except OSError:
+                current = None  # file was deleted
+
+            # Restore: briefly make writable, rewrite, re-lock
+            try:
+                os.chmod(full_path, 0o644)
+            except OSError:
+                pass
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            with open(full_path, "w") as f:
+                f.write(original)
+            os.chmod(full_path, 0o444)
 
     def reset(self, task_id: Optional[str] = None) -> CodeObservation:
         """
@@ -127,39 +167,16 @@ class CodeReviewEnvironment:
 
     def _get_test_pass_rate(self) -> float:
         """
-        Run pytest in the current workspace and return the fraction of tests
-        passing (0.0–1.0).  Uses the secure clean env to prevent credential leaks.
-        Delegates to the per-task GRADERS entry for an explicit dispatch path.
+        Dispatch to the per-task grader and return pass rate [0.0, 1.0].
+
+        Uses the GRADERS dict from tasks.py so each task has an explicit,
+        named grader function — not a single shared anonymous pytest call.
+        The grader runs pytest internally with a clean minimal environment.
         """
         grader = GRADERS.get(self.state.task_id)
         if grader is None:
             return 0.0
-
-        env = _make_clean_env(self.workspace_dir)
-        try:
-            result = subprocess.run(
-                "pytest tests/ --disable-warnings -v",
-                cwd=self.workspace_dir, shell=True,
-                capture_output=True, text=True, timeout=15, env=env
-            )
-        except TimeoutExpired:
-            return 0.0
-
-        if result.returncode == 0:
-            return 1.0
-
-        output = result.stdout + result.stderr
-        n_passed = sum(1 for line in output.splitlines() if " PASSED" in line)
-        n_failed = sum(1 for line in output.splitlines() if " FAILED" in line or " ERROR" in line)
-        total = n_passed + n_failed
-        if total > 0:
-            return n_passed / total
-
-        m_pass = re.search(r"(\d+) passed", output)
-        m_fail = re.search(r"(\d+) failed", output)
-        p = int(m_pass.group(1)) if m_pass else 0
-        f = int(m_fail.group(1)) if m_fail else 0
-        return p / (p + f) if (p + f) > 0 else 0.0
+        return grader(self.workspace_dir)
 
     def step(self, action_obj: AgentAction) -> Tuple[CodeObservation, float, bool, Dict[str, Any]]:
         # Guard: /reset must be called before the first /step
@@ -231,6 +248,10 @@ class CodeReviewEnvironment:
                         obs_result = "Error: Command timed out after 15 seconds. Avoid long-running or interactive commands."
                         reward = 0.005  # timeout is a wasted step
 
+                # Restore any test files the shell may have tampered with.
+                # chmod 444 alone is bypassable via 'chmod +w'; this closes it.
+                self._enforce_test_integrity()
+
             # ----------------------------------------------------------------
             # TOOL 2: PATCH FILE — Delta-based dense reward
             # ----------------------------------------------------------------
@@ -299,6 +320,8 @@ class CodeReviewEnvironment:
                                 # No improvement (stall or regression) — minimal signal.
                                 reward = 0.005
 
+                            # Expose actual pass rate for accurate breakdown metadata.
+                            info["test_pass_rate"] = round(raw, 4)
                             self.state.total_reward = round(
                                 max(self.state.total_reward, reward), 4
                             )
@@ -316,14 +339,17 @@ class CodeReviewEnvironment:
                     if result.returncode == 0:
                         reward = 0.99
                         feedback = "SUCCESS: All tests passed."
+                        info["test_pass_rate"] = 1.0
                     else:
                         raw = self._get_test_pass_rate()
                         # Map to (0.01, 0.98) — open interval
                         reward = round(0.01 + raw * 0.97, 4)
                         feedback = f"FAILED: Tests still failing.\n{result.stdout[-500:]}"
+                        info["test_pass_rate"] = round(raw, 4)
                 except TimeoutExpired:
                     reward = 0.01
                     feedback = "FAILED: Test suite timed out."
+                    info["test_pass_rate"] = 0.0
 
                 obs_result = f"Evaluation complete. {feedback}"
                 done = True

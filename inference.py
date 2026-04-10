@@ -104,8 +104,12 @@ def run_task(env: CodeReviewEnv, task_index: int) -> float:
     score = 0.0
     task_name = f"task_{task_index + 1}_pr"
 
+    # Derive the expected task_id from the index so reset targets it directly
+    # rather than relying on the round-robin counter, making each run
+    # independently reproducible regardless of prior call history.
+    expected_task_id = f"task_{task_index + 1}_pr"
     try:
-        obs = env.reset()
+        obs = env.reset(task_id=expected_task_id)
         task_name = obs.task_id
     except Exception as exc:
         print(f"[START] task={task_name} env={BENCHMARK} model={MODEL_NAME}", flush=True)

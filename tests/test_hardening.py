@@ -121,14 +121,19 @@ def test_patch_file_blocks_pytest_ini(env):
 
 def test_test_file_restored_after_shell_chmod(env):
     """Test files must be restored even if the agent does chmod +w then overwrites."""
-    test_path = os.path.join(env.workspace_dir, "tests", "test_auth.py")
+    # Find the actual test file for the current task (factory tasks use different names)
+    tests_dir = os.path.join(env.workspace_dir, "tests")
+    test_files = [f for f in os.listdir(tests_dir) if f.endswith(".py")]
+    assert test_files, "No test files found in workspace tests/ directory"
+    test_fname = test_files[0]
+    test_path = os.path.join(tests_dir, test_fname)
     original_content = open(test_path, encoding="utf-8").read()
 
     env.step(AgentAction(
         action_type="execute_command",
         command=(
-            "chmod +w tests/test_auth.py && "
-            "echo 'def test_sql_injection_fixed(): pass' > tests/test_auth.py"
+            f"chmod +w tests/{test_fname} && "
+            f"echo 'def test_always_pass(): pass' > tests/{test_fname}"
         )
     ))
 
@@ -164,10 +169,14 @@ def test_path_traversal_blocked(env):
 
 def test_direct_test_patch_blocked(env):
     """patch_file must reject writes to the tests/ directory."""
+    # Use any test file name — the guard blocks the whole tests/ dir regardless
+    tests_dir = os.path.join(env.workspace_dir, "tests")
+    test_files = [f for f in os.listdir(tests_dir) if f.endswith(".py")]
+    target = f"tests/{test_files[0]}" if test_files else "tests/test_dummy.py"
     _, reward, _, _ = env.step(AgentAction(
         action_type="patch_file",
-        target_file="tests/test_auth.py",
-        new_content="def test_sql_injection_fixed(): pass\n"
+        target_file=target,
+        new_content="def test_always_pass(): pass\n"
     ))
     assert reward == -0.05, (
         f"Security: test file tampering via patch_file must yield -0.05, got {reward}"

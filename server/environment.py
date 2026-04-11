@@ -83,7 +83,21 @@ class CodeReviewEnvironment:
 
         self._test_file_originals = {}
         self._original_repo_files = set()
-        repo = self.current_task_data["repository"]
+
+        # Support parametric tasks: factory(seed) returns {filepath: content}.
+        # Seed is derived from the episode UUID so each reset() gets a
+        # reproducible but unique problem instance — the LLM cannot memorise
+        # answers across episodes.
+        _repo_factory = self.current_task_data.get("_repo_factory")
+        if _repo_factory is not None:
+            import hashlib as _hashlib
+            _seed = int(_hashlib.sha256(
+                self.state.episode_id.encode()
+            ).hexdigest()[:8], 16)
+            repo = _repo_factory(_seed)
+        else:
+            repo = self.current_task_data.get("repository", {})
+
         for filepath, content in repo.items():
             full_path = os.path.join(self.workspace_dir, filepath)
             os.makedirs(os.path.dirname(full_path), exist_ok=True)
@@ -201,7 +215,9 @@ class CodeReviewEnvironment:
 
         self._setup_workspace()
 
-        available_files = list(self.current_task_data["repository"].keys())
+        # _original_repo_files is populated by _setup_workspace for both
+        # static "repository" tasks and factory-pattern "_repo_factory" tasks.
+        available_files = sorted(self._original_repo_files)
 
         return CodeObservation(
             task_id=self.state.task_id,
@@ -245,7 +261,7 @@ class CodeReviewEnvironment:
             obs = CodeObservation(
                 task_id=self.state.task_id,
                 context=self.current_task_data["description"] if self.current_task_data else "",
-                available_files=list(self.current_task_data["repository"].keys()) if self.current_task_data else [],
+                available_files=sorted(self._original_repo_files),
                 action_result="Episode is already done. Call /reset to start a new episode.",
                 step_number=self.state.step_count,
                 done=True,
@@ -255,7 +271,7 @@ class CodeReviewEnvironment:
 
         try:
             self.state.step_count += 1
-            available_files = list(self.current_task_data["repository"].keys())
+            available_files = sorted(self._original_repo_files)
 
             obs_result = ""
             reward = 0.0

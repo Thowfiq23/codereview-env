@@ -23,6 +23,14 @@ _CLEAN_ENV_KEYS = {"PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "USER", "LOGNAME"
 # Windows requires these vars for Python/subprocess to initialise correctly.
 _WINDOWS_ENV_KEYS = {"SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "TEMP", "TMP", "COMSPEC"}
 
+# Pytest/Python control files that can override test discovery and behaviour
+# when placed anywhere in the workspace tree. An agent must not be allowed to
+# create these unless they were present in the original task repository.
+_PYTEST_CONTROL_NAMES = frozenset({
+    "conftest.py", "pytest.ini", "pyproject.toml", "setup.cfg",
+    "tox.ini", "sitecustomize.py", ".pytest.ini",
+})
+
 
 def _make_clean_env(pythonpath: str) -> Dict[str, str]:
     """Return a minimal subprocess environment — no server credentials leaked."""
@@ -61,6 +69,9 @@ class CodeReviewEnvironment:
         # Used by _enforce_test_integrity() to restore files after every
         # execute_command — chmod 444 alone is bypassable via the shell.
         self._test_file_originals: Dict[str, str] = {}
+        # All file paths present at episode start (relative, forward-slash).
+        # Used to distinguish original repo files from agent-created ones.
+        self._original_repo_files: set = set()
 
     def _setup_workspace(self):
         """Create a fresh isolated workspace for this episode."""
@@ -71,12 +82,14 @@ class CodeReviewEnvironment:
         os.makedirs(self.workspace_dir, exist_ok=True)
 
         self._test_file_originals = {}
+        self._original_repo_files = set()
         repo = self.current_task_data["repository"]
         for filepath, content in repo.items():
             full_path = os.path.join(self.workspace_dir, filepath)
             os.makedirs(os.path.dirname(full_path), exist_ok=True)
             with open(full_path, "w", encoding="utf-8") as f:
                 f.write(content)
+            self._original_repo_files.add(filepath)
             if filepath.startswith("tests/"):
                 # Make read-only AND store original content.
                 # chmod 444 alone is bypassable via shell ('chmod +w …').
@@ -138,6 +151,23 @@ class CodeReviewEnvironment:
                             os.remove(fpath)
                         except OSError:
                             pass
+
+        # Remove unauthorized pytest/Python control files at ANY level of the
+        # workspace tree.  An agent can create workspace-root conftest.py,
+        # pytest.ini, pyproject.toml, sitecustomize.py, etc. to override test
+        # collection globally and make broken tests appear to pass.
+        # This sweep is the authoritative close for that exploit vector.
+        for dirpath, _, filenames in os.walk(self.workspace_dir):
+            for fname in filenames:
+                if fname not in _PYTEST_CONTROL_NAMES:
+                    continue
+                fpath = os.path.normpath(os.path.join(dirpath, fname))
+                relpath = os.path.relpath(fpath, self.workspace_dir).replace(os.sep, "/")
+                if relpath not in self._original_repo_files:
+                    try:
+                        os.remove(fpath)
+                    except OSError:
+                        pass
 
     def reset(self, task_id: Optional[str] = None) -> CodeObservation:
         """
@@ -299,9 +329,27 @@ class CodeReviewEnvironment:
                         reward = -0.05
 
                     else:
-                        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+                        # Block unauthorized pytest control files before any
+                        # write.  Without this check an agent can create
+                        # workspace-root conftest.py via patch_file (the
+                        # shell-side bypass is caught by _enforce_test_integrity
+                        # but patch_file bypasses that sweep entirely).
+                        _ctrl_rel = os.path.relpath(
+                            full_path, workspace_real
+                        ).replace(os.sep, "/")
+                        if (os.path.basename(full_path) in _PYTEST_CONTROL_NAMES
+                                and _ctrl_rel not in self._original_repo_files):
+                            obs_result = (
+                                "Security Error: Creating pytest configuration files "
+                                "(conftest.py, pytest.ini, pyproject.toml, etc.) is not allowed."
+                            )
+                            reward = -0.05
+                            full_path = None
+
+                        if full_path is not None:
+                            os.makedirs(os.path.dirname(full_path), exist_ok=True)
                         import py_compile, tempfile
-                        if full_path.endswith(".py"):
+                        if full_path is not None and full_path.endswith(".py"):
                             try:
                                 with tempfile.NamedTemporaryFile(
                                     mode="w", suffix=".py", delete=False,

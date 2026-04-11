@@ -248,13 +248,14 @@ def run_task(env: CodeReviewEnv, task_index: int) -> float:
 def main():
     env = CodeReviewEnv(base_url=ENV_URL)
     scores = []
-    for i in range(3):
+    n_tasks = 5
+    for i in range(n_tasks):
         scores.append(run_task(env, i))
 
     avg = sum(scores) / len(scores) if scores else 0.0
     # Print summary to stderr — stdout must contain only [START]/[STEP]/[END] per spec
     print(
-        f"[SUMMARY] tasks=3 scores={','.join(f'{s:.2f}' for s in scores)} "
+        f"[SUMMARY] tasks={n_tasks} scores={','.join(f'{s:.2f}' for s in scores)} "
         f"average={avg:.2f}",
         file=__import__('sys').stderr, flush=True
     )

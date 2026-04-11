@@ -121,7 +121,84 @@ def test_performance():
     assert has_await_sleep, "Performance Error: process_payment must use 'await asyncio.sleep(...)'."
 """
         }
-    }
+    },
+    {
+        "task_id": "task_4_pr",
+        "description": "PR #173: Implement LRU response cache. Three bugs found in code review: eviction never fires, move-to-recent is missing, and the deserializer crashes on None. Fix them so the tests pass.",
+        "repository": {
+            "cache/store.py": "from collections import OrderedDict\n\nclass LRUCache:\n    def __init__(self, capacity: int):\n        self.capacity = capacity\n        self.cache = OrderedDict()\n\n    def get(self, key: str):\n        if key not in self.cache:\n            return None\n        # BUG: must move key to end (most-recently-used) on every access\n        return self.cache[key]\n\n    def put(self, key: str, value) -> None:\n        if key in self.cache:\n            del self.cache[key]\n        elif len(self.cache) >= self.capacity:\n            # BUG: oldest entry must be evicted here -- currently nothing happens\n            pass\n        self.cache[key] = value\n",
+            "cache/serializer.py": "import json\n\ndef serialize(data) -> str:\n    return json.dumps(data)\n\ndef deserialize(raw: str):\n    # BUG: crashes with TypeError when raw is None -- should return None\n    return json.loads(raw)\n",
+            "tests/test_cache.py": """
+from cache.store import LRUCache
+from cache.serializer import serialize, deserialize
+
+def test_lru_eviction():
+    cache = LRUCache(capacity=2)
+    cache.put("a", 1)
+    cache.put("b", 2)
+    cache.put("c", 3)  # must evict "a" (oldest)
+    assert cache.get("a") is None, "LRU Error: oldest key 'a' should have been evicted when capacity was exceeded."
+    assert cache.get("b") == 2
+    assert cache.get("c") == 3
+
+def test_lru_access_order():
+    cache = LRUCache(capacity=2)
+    cache.put("a", 1)
+    cache.put("b", 2)
+    cache.get("a")       # 'a' is now most-recently used
+    cache.put("c", 3)    # must evict 'b' (LRU), NOT 'a'
+    assert cache.get("b") is None, "LRU Error: 'b' should have been evicted (least recently used) after 'a' was accessed."
+    assert cache.get("a") == 1, "LRU Error: 'a' was accessed most recently and must NOT be evicted."
+
+def test_deserialize_none():
+    assert deserialize(None) is None, "Serializer Error: deserialize(None) must return None, not raise an exception."
+    assert deserialize(serialize({"k": "v"})) == {"k": "v"}, "Serializer Error: round-trip must preserve dict."
+
+def test_deserialize_values():
+    for val in [42, [1, 2], True, "hello"]:
+        assert deserialize(serialize(val)) == val, f"Serializer Error: round-trip failed for {val!r}."
+"""
+        }
+    },
+    {
+        "task_id": "task_5_pr",
+        "description": "PR #241: Fix statistics and data normalisation module. Two logic bugs: mean divides by wrong denominator, and normalise returns 0-100 instead of 0.0-1.0. Fix them so the tests pass.",
+        "repository": {
+            "stats/aggregator.py": "def mean(values: list) -> float:\n    if not values:\n        raise ValueError('Cannot compute mean of empty list')\n    # BUG: off-by-one -- divides by len+1 instead of len\n    return sum(values) / (len(values) + 1)\n\ndef variance(values: list) -> float:\n    if len(values) < 2:\n        raise ValueError('Variance requires at least 2 values')\n    m = mean(values)\n    return sum((x - m) ** 2 for x in values) / len(values)\n",
+            "stats/normalizer.py": "def min_max_normalize(values: list) -> list:\n    if not values:\n        return []\n    lo, hi = min(values), max(values)\n    if lo == hi:\n        return [0.0] * len(values)\n    # BUG: should return 0.0-1.0 range, not 0-100\n    return [(x - lo) / (hi - lo) * 100 for x in values]\n",
+            "tests/test_stats.py": """
+from stats.aggregator import mean, variance
+from stats.normalizer import min_max_normalize
+
+def test_mean_basic():
+    assert mean([1, 2, 3, 4, 5]) == 3.0, "Stats Error: mean([1,2,3,4,5]) must be 3.0."
+    assert mean([10, 20]) == 15.0, "Stats Error: mean([10,20]) must be 15.0."
+    assert mean([7]) == 7.0, "Stats Error: mean of single element must equal that element."
+
+def test_variance():
+    # Classical dataset: mean=5, variance=4.0
+    result = variance([2, 4, 4, 4, 5, 5, 7, 9])
+    assert abs(result - 4.0) < 0.001, f"Stats Error: variance must be 4.0, got {result:.4f}."
+
+def test_normalize_range():
+    result = min_max_normalize([0, 5, 10])
+    assert result == [0.0, 0.5, 1.0], f"Normalizer Error: expected [0.0, 0.5, 1.0], got {result}."
+
+def test_normalize_bounds():
+    values = [3, 1, 4, 1, 5, 9, 2, 6]
+    result = min_max_normalize(values)
+    assert all(0.0 <= v <= 1.0 for v in result), (
+        f"Normalizer Error: all values must be in [0.0, 1.0], got {result}."
+    )
+    assert result[values.index(min(values))] == 0.0, "Normalizer Error: minimum must map to 0.0."
+    assert result[values.index(max(values))] == 1.0, "Normalizer Error: maximum must map to 1.0."
+
+def test_normalize_equal_values():
+    result = min_max_normalize([7, 7, 7])
+    assert all(v == 0.0 for v in result), "Normalizer Error: equal values must all normalise to 0.0."
+"""
+        }
+    },
 ]
 
 
@@ -225,9 +302,32 @@ def grade_task_3_pr(workspace_dir: str) -> float:
     return _run_pytest(workspace_dir)
 
 
+def grade_task_4_pr(workspace_dir: str) -> float:
+    """
+    Grader for task_4_pr — LRU Cache.
+    Checks:
+      - LRUCache evicts oldest entry when capacity is exceeded
+      - LRUCache moves accessed keys to most-recently-used position
+      - deserialize(None) returns None without raising
+    """
+    return _run_pytest(workspace_dir)
+
+
+def grade_task_5_pr(workspace_dir: str) -> float:
+    """
+    Grader for task_5_pr — Statistics & Normalisation.
+    Checks:
+      - mean() divides by len(values), not len(values)+1
+      - min_max_normalize() returns values in [0.0, 1.0], not [0, 100]
+    """
+    return _run_pytest(workspace_dir)
+
+
 # Dispatch table: maps task_id → grader callable(workspace_dir) → float
 GRADERS: Dict[str, Callable[[str], float]] = {
     "task_1_pr": grade_task_1_pr,
     "task_2_pr": grade_task_2_pr,
     "task_3_pr": grade_task_3_pr,
+    "task_4_pr": grade_task_4_pr,
+    "task_5_pr": grade_task_5_pr,
 }

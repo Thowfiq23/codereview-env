@@ -146,9 +146,9 @@ Every engineering team has this loop: CI fails → engineer triages → finds ro
 | 7 | `INC-007` | Config Service | ⚫ Expert | 3 | String→int types · `restart_service` gate |
 | 8 | `INC-008` | DB Migration | ⚫ Expert | 3 | Lexicographic sort · silent exceptions · `executescript` |
 | 9 | `INC-009` | Memory Leak / OOM | ⚫ Expert | 3 | Unbounded cache · missing eviction · module accumulator |
-| 10 | `INC-010` | Network Timeout Cascade | ⚫ Expert | 3 | Two-sided timeout trap · retry count · circuit breaker |
+| 10 | `INC-010` | 3-Service Topology Cascade | ⚫ Expert | 3 | Gateway → auth → db topology · worsening restart mechanic · per-service `restart_service` gate |
 
-> **Difficulty note:** Tasks 1–4 reward basic code comprehension. Tasks 5–6 require algorithmic reasoning and coupling awareness. Tasks 7–9 require multi-step causal reasoning: diagnose → patch → restart → verify. Task 10 is a pure code fix with no restart gate — its difficulty comes from a two-sided constraint trap and coupled network components.
+> **Difficulty note:** Tasks 1–4 reward basic code comprehension. Tasks 5–6 require algorithmic reasoning and coupling awareness. Tasks 7–9 require multi-step causal reasoning: diagnose → patch → restart → verify. Task 10 adds service topology: three services with a dependency chain, a worsening mechanic (restarting gateway before db floods auth), and per-service targeted restarts.
 
 ---
 
@@ -302,17 +302,27 @@ After a partial fix, the agent must call `inspect_logs` to read which component 
 </details>
 
 <details>
-<summary><strong>INC-010 — Network Timeout Cascade</strong> &nbsp;⚫ Expert</summary>
+<summary><strong>INC-010 — 3-Service Topology Cascade</strong> &nbsp;⚫ Expert</summary>
 
-**Incident:** Every downstream call is failing. Circuit breaker trips on single errors, taking out the entire service mesh.
+**Incident:** 3-service topology (gateway → auth → db) is fully down after a config push. Logs show cascading failures propagating upstream from db through auth to gateway.
 
-**Bugs (3) — with two-sided trap:**
-1. `CONNECT_TIMEOUT = 0.001` — too low, causes immediate connection failure. But setting it `> 60.0` also fails the range test. Agent must choose a value in `[0.1, 60.0]`.
-2. Retry loop runs `range(retries + 1)` instead of `range(retries)` — executes one extra attempt
-3. Circuit breaker opens after `>= 1` failure instead of `>= failure_threshold` — trips on isolated errors
+**Architecture:**
+```
+gateway/circuit_breaker.py → auth/client.py → db/config.py
+```
+Each service has its own config, client, and `service.log`. The agent must fix in **dependency order** (db first, then auth, then gateway) — restarting gateway while db is still crashed floods auth with retries, worsening `auth.error_rate` even after its code is fixed.
 
-**Seeded variables:** `MAX_RETRIES`, `failure_threshold` (vary per episode)
-**Optimal steps:** 6 · **Tests:** 5
+**Bugs (3) — one per service:**
+1. `db/config.py`: `CONNECT_TIMEOUT = 0.001` — too low, causes immediate connection failure. Valid range: `[0.1, 60.0]`.
+2. `auth/client.py`: Retry loop runs `range(MAX_RETRIES + 1)` instead of `range(MAX_RETRIES)` — one extra attempt
+3. `gateway/circuit_breaker.py`: Opens after `>= 1` failure instead of `>= failure_threshold` — trips on isolated errors
+
+**Worsening mechanic:** `restart_service --service gateway` while db is crashed → auth floods with retries → `auth.error_rate += 0.3` → auth transitions to degraded even if its code was already fixed.
+
+**Seeded variables:** `correct_timeout`, `MAX_RETRIES`, `failure_threshold` (vary per episode)
+**Optimal steps:** 7 · **Tests:** 5
+
+Use `inspect_logs` (optionally with `service_name: "db"/"auth"/"gateway"`) to read per-service logs and trace the cascade before patching.
 
 </details>
 
@@ -379,14 +389,14 @@ Agents submit one action per step as a JSON object with `action_type` as the dis
 | `run_tests` | `action_type` | Runs `pytest` on the full suite. Add `path` for a targeted file. |
 | `read_file` | `action_type`, `path` | Reads any workspace file cleanly. Prefer this over `execute_command`. |
 | `search_codebase` | `action_type`, `pattern` | Greps a regex across all `.py` files in the workspace. |
-| `inspect_logs` | `action_type` | Reads `service.log` / `migration.log` produced by `restart_service`. |
+| `inspect_logs` | `action_type` | Reads `service.log` / `migration.log` produced by `restart_service`. For task 10, add `service_name: "db"/"auth"/"gateway"` to read a specific service log. |
 
 ### Modification Tools
 
 | Action | Required Fields | What It Does |
 |--------|----------------|--------------|
 | `patch_file` | `action_type`, `target_file`, `new_content` | Overwrites source file with fixed content. Triggers immediate delta reward. |
-| `restart_service` | `action_type` | Runs `app_init.py` to apply config/migration/memory fixes. Tasks 7, 8, 9 only. |
+| `restart_service` | `action_type` | Runs `app_init.py` to apply config/migration/memory fixes. Tasks 7, 8, 9, 10. For task 10, add `service_name: "db"/"auth"/"gateway"` to target a specific service. |
 
 ### Terminal Tools
 
@@ -430,6 +440,17 @@ Each call to `POST /step` returns a `CodeObservation` with these fields:
 {
   "status": "oom_killed",
   "last_error": "Cache grew without bound — memory leak in add()"
+}
+```
+
+**`service_status` example** (task 10, topology — before any fixes):
+```json
+{
+  "services": {
+    "db":      {"status": "crashed",  "latency_ms": 0,   "depends_on": [],       "error_rate": 1.0, "restart_count": 0},
+    "auth":    {"status": "degraded", "latency_ms": 0,   "depends_on": ["db"],   "error_rate": 0.8, "restart_count": 0},
+    "gateway": {"status": "degraded", "latency_ms": 0,   "depends_on": ["auth"], "error_rate": 0.6, "restart_count": 0}
+  }
 }
 ```
 

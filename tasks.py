@@ -1380,233 +1380,492 @@ def test_service_state_running():
 
 def _make_task_10_repo(seed: int) -> dict:
     """
-    Network Timeout Cascade + Circuit Breaker Bugs — 3 bugs across 3 files.
+    Network Timeout Cascade — 3-service topology incident (gateway -> auth -> db).
 
-      1. config/network.py: CONNECT_TIMEOUT = 0.001 (too small, causes spurious
-         timeouts that cascade across dependent services).
-         Fix: set to a value in [0.1, 60.0] (e.g. the seeded correct_timeout).
-         TRAP: setting CONNECT_TIMEOUT > 60.0 fails the range test.
+    One bug per service:
+      1. services/db/config.py: CONNECT_TIMEOUT = 0.001 (two-sided trap: must be in [0.1, 60.0])
+      2. services/auth/client.py: range(MAX_RETRIES + 1) — one extra retry attempt
+      3. services/gateway/config.py: CIRCUIT_BREAKER_THRESHOLD = 1 (opens on first failure)
 
-      2. services/client.py: range(retries + 1) runs one too many attempts
-         (e.g. retries=3 produces 4 attempts: 0,1,2,3).
-         Fix: range(retries)
+    Causal ordering matters:
+      • Restarting gateway while db is crashed floods auth — auth degrades further
+      • Correct fix order: fix db -> restart db -> fix auth -> restart auth -> fix gateway -> restart gateway
+      • Or fix all 3 then restart_service (no service_name) to check in dependency order
 
-      3. services/circuit_breaker.py: opens circuit after just 1 failure
-         (threshold check is >= 1 instead of >= failure_threshold).
-         Fix: use >= self.failure_threshold
+    Worsening mechanic:
+      restart_service --service gateway while db/auth unhealthy
+        => auth.error_rate increases, auth may transition running -> degraded
+        => gateway stays degraded, new log entry explains cascade
 
     Randomised per episode:
-      • correct_timeout (2.0, 3.0, 5.0, or 10.0) — seeded but test checks range, not value
-      • failure_threshold (3, 4, or 5) — embedded in tests as required consecutive failures
+      • correct_timeout  (2.0, 3.0, 5.0, or 10.0)
+      • failure_threshold (3, 4, or 5)
+      • max_retries       (2, 3, or 4)
     """
+    import json as _json
     rng = random.Random(seed)
-    correct_timeout  = rng.choice([2.0, 3.0, 5.0, 10.0])
+    correct_timeout   = rng.choice([2.0, 3.0, 5.0, 10.0])
     failure_threshold = rng.choice([3, 4, 5])
     max_retries       = rng.choice([2, 3, 4])
 
-    network_src = (
-        '"""Network configuration for service clients."""\n'
+    # ── services/db ──────────────────────────────────────────────────────────
+    db_init = ""
+    db_config_src = (
+        '"""Database service configuration."""\n'
         "\n"
-        "# BUG 1: CONNECT_TIMEOUT is dangerously low — causes spurious timeouts\n"
-        "# that cascade to every dependent service.\n"
-        f"# Fix: set to a value in [0.1, 60.0] (e.g. {correct_timeout})\n"
+        "# BUG 1: CONNECT_TIMEOUT is dangerously low — causes immediate connection\n"
+        "# failures that cascade through auth into gateway.\n"
+        f"# Fix: set to a value in [0.1, 60.0]  (e.g. {correct_timeout})\n"
+        "# TRAP: values > 60.0 also fail the range test — stay within [0.1, 60.0].\n"
         "CONNECT_TIMEOUT = 0.001\n"
         "\n"
-        f"# MAX_RETRIES: number of retry attempts on transient failure\n"
-        f"MAX_RETRIES = {max_retries}\n"
+        'DB_HOST = "localhost"\n'
+        "DB_PORT = 5432\n"
+    )
+    db_client_src = (
+        '"""Database service health check."""\n'
+        "from services.db.config import CONNECT_TIMEOUT\n"
+        "\n"
+        "\n"
+        "def check_health() -> dict:\n"
+        '    """Verify DB config is valid. Raises on bad CONNECT_TIMEOUT."""\n'
+        "    if not isinstance(CONNECT_TIMEOUT, (int, float)):\n"
+        "        raise TypeError(\n"
+        "            f\"CONNECT_TIMEOUT must be numeric, got {type(CONNECT_TIMEOUT).__name__}\"\n"
+        "        )\n"
+        "    if not (0.1 <= CONNECT_TIMEOUT <= 60.0):\n"
+        "        raise TimeoutError(\n"
+        "            f\"CONNECT_TIMEOUT={CONNECT_TIMEOUT} outside valid range [0.1, 60.0]. \"\n"
+        "            \"All DB connections will time out immediately.\"\n"
+        "        )\n"
+        "    return {\n"
+        '        "status": "running",\n'
+        '        "latency_ms": int(CONNECT_TIMEOUT * 50),\n'
+        '        "error_rate": 0.0,\n'
+        "    }\n"
     )
 
-    client_src = (
-        '"""HTTP service client with retry-on-timeout."""\n'
-        "import time\n"
-        "from config.network import CONNECT_TIMEOUT, MAX_RETRIES\n"
+    # ── services/auth ────────────────────────────────────────────────────────
+    auth_init = ""
+    auth_config_src = (
+        '"""Auth service configuration."""\n'
+        f"MAX_RETRIES = {max_retries}   # number of connection attempts\n"
+        "AUTH_TIMEOUT = 5.0\n"
+    )
+    auth_client_src = (
+        '"""Auth service client with retry logic."""\n'
+        "from services.auth.config import MAX_RETRIES\n"
         "\n"
-        "class ServiceClient:\n"
-        '    """Thin HTTP client with configurable retry behaviour."""\n'
         "\n"
-        "    def __init__(self, base_url: str):\n"
-        "        self.base_url = base_url\n"
+        "def connect_with_retry() -> dict:\n"
+        '    """Attempt connection; return attempt count."""\n'
+        "    attempts = 0\n"
+        "    # BUG 2: range(MAX_RETRIES + 1) makes one extra attempt.\n"
+        "    # Fix: change to range(MAX_RETRIES)\n"
+        "    for _ in range(MAX_RETRIES + 1):\n"
+        "        attempts += 1\n"
+        '    return {"attempts": attempts, "expected": MAX_RETRIES}\n'
         "\n"
-        "    def request(self, endpoint: str, retries: int = MAX_RETRIES) -> dict:\n"
-        '        """Make a request; retry up to `retries` times on TimeoutError."""\n'
-        "        last_err = None\n"
-        "        # BUG 2: range(retries + 1) runs one extra attempt.\n"
-        "        # With retries=3 this produces attempts 0,1,2,3 (four total).\n"
-        "        # Fix: range(retries)  (attempts 0,1,2 — exactly three)\n"
-        "        for attempt in range(retries + 1):\n"
-        "            try:\n"
-        "                return self._do_request(endpoint)\n"
-        "            except TimeoutError as e:\n"
-        "                last_err = e\n"
-        "                time.sleep(0.0)  # no real delay in tests\n"
-        "        raise last_err\n"
         "\n"
-        "    def _do_request(self, endpoint: str) -> dict:\n"
-        "        # Overridden in tests; real impl would use requests/httpx\n"
-        "        return {'status': 'ok', 'endpoint': endpoint}\n"
+        "def check_health() -> dict:\n"
+        '    """Check auth health. Status depends on retry count correctness."""\n'
+        "    result = connect_with_retry()\n"
+        "    ok = result[\"attempts\"] == result[\"expected\"]\n"
+        "    return {\n"
+        '        "status": "running" if ok else "degraded",\n'
+        '        "latency_ms": 120 if ok else None,\n'
+        '        "error_rate": 0.0 if ok else 0.7,\n'
+        "    }\n"
     )
 
-    cb_src = (
+    # ── services/gateway ─────────────────────────────────────────────────────
+    gw_init = ""
+    gw_config_src = (
+        '"""Gateway service configuration."""\n'
+        "\n"
+        "# BUG 3: CIRCUIT_BREAKER_THRESHOLD = 1 causes the circuit to open on\n"
+        "# the very first failure, preventing any recovery after a transient error.\n"
+        f"# Fix: set to {failure_threshold}  (the correct threshold for this episode)\n"
+        "CIRCUIT_BREAKER_THRESHOLD = 1\n"
+        "\n"
+        "GATEWAY_TIMEOUT = 10.0\n"
+    )
+    gw_cb_src = (
         '"""Circuit breaker pattern for cascading-failure protection."""\n'
-        "import time\n"
+        "from services.gateway.config import CIRCUIT_BREAKER_THRESHOLD\n"
+        "\n"
         "\n"
         "class CircuitBreaker:\n"
-        '    """Opens after failure_threshold consecutive failures; closes after reset_timeout."""\n'
+        '    """Opens after CIRCUIT_BREAKER_THRESHOLD consecutive failures."""\n'
         "\n"
-        "    def __init__(self, failure_threshold: int = "
-        f"{failure_threshold}, reset_timeout: float = 60.0):\n"
-        "        self.failure_threshold = failure_threshold\n"
-        "        self.reset_timeout     = reset_timeout\n"
+        "    def __init__(self):\n"
+        "        self.failure_threshold = CIRCUIT_BREAKER_THRESHOLD\n"
         "        self._failure_count    = 0\n"
-        "        self._state            = 'closed'  # closed | open | half-open\n"
-        "        self._last_failure_ts  = None\n"
+        "        self._state            = 'closed'  # closed | open\n"
         "\n"
         "    def call(self, func, *args, **kwargs):\n"
         '        """Execute func through the circuit breaker."""\n'
         "        if self._state == 'open':\n"
-        "            if (self._last_failure_ts is not None and\n"
-        "                    time.time() - self._last_failure_ts > self.reset_timeout):\n"
-        "                self._state = 'half-open'\n"
-        "            else:\n"
-        "                raise RuntimeError('Circuit breaker is OPEN — failing fast')\n"
+        "            raise RuntimeError('Circuit breaker is OPEN — failing fast')\n"
         "        try:\n"
         "            result = func(*args, **kwargs)\n"
-        "            if self._state == 'half-open':\n"
-        "                self._state = 'closed'\n"
-        "                self._failure_count = 0\n"
+        "            self._failure_count = 0\n"
         "            return result\n"
         "        except Exception:\n"
         "            self._failure_count += 1\n"
-        "            self._last_failure_ts = time.time()\n"
-        "            # BUG 3: opens circuit after just 1 failure instead of failure_threshold.\n"
-        "            # Fix: >= self.failure_threshold\n"
-        "            if self._failure_count >= 1:\n"
+        "            if self._failure_count >= self.failure_threshold:\n"
         "                self._state = 'open'\n"
         "            raise\n"
+        "\n"
+        "    def check_health(self) -> dict:\n"
+        "        return {\n"
+        '            "status": "running" if self._state == "closed" else "degraded",\n'
+        '            "circuit_state": self._state,\n'
+        '            "failure_count": self._failure_count,\n'
+        '            "threshold": self.failure_threshold,\n'
+        '            "error_rate": 0.0 if self._state == "closed" else 0.94,\n'
+        "        }\n"
     )
 
-    test_template = """\
-\"\"\"Tests for INC-201: network timeout cascade and circuit breaker misbehaviour.
-
-Bug 1: CONNECT_TIMEOUT is 0.001 s — causes cascade of spurious timeouts.
-       TRAP: setting it > 60.0 also fails this test. Valid range: [0.1, 60.0].
-Bug 2: ServiceClient.request uses range(retries + 1) — one too many attempts.
-Bug 3: CircuitBreaker opens after 1 failure instead of {failure_threshold} consecutive.
-\"\"\"
-import pytest
-from config.network import CONNECT_TIMEOUT, MAX_RETRIES
-from services.client import ServiceClient
-from services.circuit_breaker import CircuitBreaker
-
-
-def test_connect_timeout_in_valid_range():
-    \"\"\"CONNECT_TIMEOUT must be in [0.1, 60.0] — too small cascades, too large delays detection.\"\"\"
-    assert isinstance(CONNECT_TIMEOUT, (int, float)), (
-        "Config Error: CONNECT_TIMEOUT must be a number."
+    # ── app_init.py ──────────────────────────────────────────────────────────
+    app_init_src = (
+        '#!/usr/bin/env python3\n'
+        '"""Topology-aware service initializer for 3-service incident.\n\n'
+        "Service dependency chain:  gateway --> auth --> db\n\n"
+        "Usage:\n"
+        "  python app_init.py                     # restart all in dependency order\n"
+        "  python app_init.py --service db        # restart db only\n"
+        "  python app_init.py --service auth      # restart auth only\n"
+        "  python app_init.py --service gateway   # restart gateway only\n\n"
+        "Worsening mechanic:\n"
+        "  Restarting gateway while db is not healthy floods auth with failed\n"
+        "  requests — auth.error_rate rises and may transition to degraded.\n"
+        "  Always fix root-cause services first: db -> auth -> gateway.\n\n"
+        "Writes service_state.json with per-service topology.\n"
+        'Per-service logs: services/{name}/service.log\n'
+        '"""\n'
+        "import argparse\n"
+        "import datetime\n"
+        "import importlib\n"
+        "import json\n"
+        "import os\n"
+        "import sys\n"
+        "\n"
+        'STATE_PATH  = "service_state.json"\n'
+        'MASTER_LOG  = "service.log"\n'
+        'SERVICES    = ["db", "auth", "gateway"]\n'
+        "\n"
+        "\n"
+        "def _ts():\n"
+        "    return datetime.datetime.utcnow().isoformat() + 'Z'\n"
+        "\n"
+        "\n"
+        "def _log(service, level, msg):\n"
+        "    entry = f'{_ts()} {level} [{service}] {msg}\\n'\n"
+        "    with open(MASTER_LOG, 'a') as f:\n"
+        "        f.write(entry)\n"
+        "    svc_log = os.path.join('services', service, 'service.log')\n"
+        "    os.makedirs(os.path.dirname(svc_log), exist_ok=True)\n"
+        "    with open(svc_log, 'a') as f:\n"
+        "        f.write(entry)\n"
+        "\n"
+        "\n"
+        "def _load_topology():\n"
+        "    if os.path.isfile(STATE_PATH):\n"
+        "        try:\n"
+        "            with open(STATE_PATH) as f:\n"
+        "                return json.load(f)\n"
+        "        except Exception:\n"
+        "            pass\n"
+        "    return {\n"
+        "        'services': {\n"
+        "            'db':      {'status': 'crashed',  'latency_ms': None, 'depends_on': [],       'error_rate': 1.0,  'restart_count': 0},\n"
+        "            'auth':    {'status': 'degraded', 'latency_ms': None, 'depends_on': ['db'],   'error_rate': 0.7,  'restart_count': 0},\n"
+        "            'gateway': {'status': 'degraded', 'latency_ms': 9999, 'depends_on': ['auth'], 'error_rate': 0.94, 'restart_count': 0},\n"
+        "        }\n"
+        "    }\n"
+        "\n"
+        "\n"
+        "def _write_topology(topo):\n"
+        "    with open(STATE_PATH, 'w') as f:\n"
+        "        json.dump(topo, f, indent=2)\n"
+        "\n"
+        "\n"
+        "def _restart_db(topo):\n"
+        "    svc = dict(topo['services']['db'])\n"
+        "    svc['restart_count'] = svc.get('restart_count', 0) + 1\n"
+        "    svc['depends_on'] = []\n"
+        "    try:\n"
+        "        import services.db.client as mod\n"
+        "        importlib.reload(mod)\n"
+        "        result = mod.check_health()\n"
+        "        svc.update(result)\n"
+        "        _log('db', 'INFO', f'Health OK: {result}')\n"
+        "    except Exception as e:\n"
+        "        svc['status'] = 'crashed'\n"
+        "        svc['latency_ms'] = None\n"
+        "        svc['error_rate'] = 1.0\n"
+        "        _log('db', 'FATAL', f'Health check failed: {e}')\n"
+        "    topo['services']['db'] = svc\n"
+        "\n"
+        "\n"
+        "def _restart_auth(topo):\n"
+        "    svc = dict(topo['services']['auth'])\n"
+        "    svc['restart_count'] = svc.get('restart_count', 0) + 1\n"
+        "    svc['depends_on'] = ['db']\n"
+        "    db_status = topo['services']['db']['status']\n"
+        "    try:\n"
+        "        import services.auth.client as mod\n"
+        "        importlib.reload(mod)\n"
+        "        result = mod.check_health()\n"
+        "        if db_status not in ('running', 'healthy'):\n"
+        "            svc['status'] = 'degraded'\n"
+        "            svc['latency_ms'] = None\n"
+        "            svc['error_rate'] = max(result.get('error_rate', 0.5), 0.5)\n"
+        "            _log('auth', 'WARNING',\n"
+        "                 f'Auth code OK but db is {db_status!r} — auth cannot connect. '\n"
+        "                 'Fix db first, then restart auth.')\n"
+        "        else:\n"
+        "            svc.update(result)\n"
+        "            _log('auth', 'INFO', f'Health OK: {result}')\n"
+        "    except Exception as e:\n"
+        "        svc['status'] = 'degraded'\n"
+        "        svc['latency_ms'] = None\n"
+        "        svc['error_rate'] = 0.9\n"
+        "        _log('auth', 'ERROR', f'Health check failed: {e}')\n"
+        "    topo['services']['auth'] = svc\n"
+        "\n"
+        "\n"
+        "def _restart_gateway(topo):\n"
+        "    svc = dict(topo['services']['gateway'])\n"
+        "    svc['restart_count'] = svc.get('restart_count', 0) + 1\n"
+        "    svc['depends_on'] = ['auth']\n"
+        "    auth_status = topo['services']['auth']['status']\n"
+        "    db_status   = topo['services']['db']['status']\n"
+        "    # Worsening mechanic: restarting gateway while db/auth unhealthy\n"
+        "    # floods auth with failed requests\n"
+        "    if auth_status != 'running' or db_status not in ('running', 'healthy'):\n"
+        "        new_err = min(topo['services']['auth'].get('error_rate', 0.5) + 0.3, 0.99)\n"
+        "        topo['services']['auth']['error_rate'] = new_err\n"
+        "        if topo['services']['auth']['status'] == 'running':\n"
+        "            topo['services']['auth']['status'] = 'degraded'\n"
+        "        _log('gateway', 'FATAL',\n"
+        "             f'CASCADING FAILURE: gateway restarted while db={db_status!r} '\n"
+        "             f'auth={auth_status!r}. Auth flooded — error_rate now {new_err:.2f}. '\n"
+        "             'Fix order: db first, then auth, then gateway.')\n"
+        "        svc['status'] = 'degraded'\n"
+        "        svc['latency_ms'] = 9999\n"
+        "        svc['error_rate'] = min(svc.get('error_rate', 0.94) + 0.05, 0.99)\n"
+        "        topo['services']['gateway'] = svc\n"
+        "        return\n"
+        "    try:\n"
+        "        import services.gateway.circuit_breaker as cb_mod\n"
+        "        importlib.reload(cb_mod)\n"
+        "        cb = cb_mod.CircuitBreaker()\n"
+        "        # Probe: circuit should stay closed after (threshold-1) failures\n"
+        "        n_probe = max(cb.failure_threshold - 1, 1)\n"
+        "        def _probe_fail():\n"
+        "            raise RuntimeError('health-check probe')\n"
+        "        for _ in range(n_probe):\n"
+        "            try:\n"
+        "                cb.call(_probe_fail)\n"
+        "            except RuntimeError:\n"
+        "                pass\n"
+        "        if cb._state == 'closed':\n"
+        "            svc['status'] = 'running'\n"
+        "            svc['latency_ms'] = 45\n"
+        "            svc['error_rate'] = 0.0\n"
+        "            svc['circuit_state'] = 'closed'\n"
+        "            svc['threshold'] = cb.failure_threshold\n"
+        "            _log('gateway', 'INFO',\n"
+        "                 f'Circuit breaker healthy: threshold={cb.failure_threshold}')\n"
+        "        else:\n"
+        "            svc['status'] = 'degraded'\n"
+        "            svc['error_rate'] = 0.94\n"
+        "            svc['circuit_state'] = 'open'\n"
+        "            _log('gateway', 'WARNING',\n"
+        "                 f'Circuit opened after {cb._failure_count} failure(s) '\n"
+        "                 f'(threshold={cb.failure_threshold}). '\n"
+        "                 'Fix: set CIRCUIT_BREAKER_THRESHOLD correctly in services/gateway/config.py')\n"
+        "    except Exception as e:\n"
+        "        svc['status'] = 'degraded'\n"
+        "        svc['error_rate'] = 0.94\n"
+        "        _log('gateway', 'ERROR', f'Gateway check failed: {e}')\n"
+        "    topo['services']['gateway'] = svc\n"
+        "\n"
+        "\n"
+        "def main():\n"
+        "    parser = argparse.ArgumentParser()\n"
+        "    parser.add_argument('--service', choices=['db', 'auth', 'gateway'],\n"
+        "                        help='Restart a specific service; omit for all')\n"
+        "    args = parser.parse_args()\n"
+        "    topo = _load_topology()\n"
+        "    if args.service:\n"
+        "        {'db': _restart_db, 'auth': _restart_auth,\n"
+        "         'gateway': _restart_gateway}[args.service](topo)\n"
+        "        print(f\"[{args.service}] status={topo['services'][args.service]['status']}\")\n"
+        "    else:\n"
+        "        for name, fn in [('db', _restart_db), ('auth', _restart_auth),\n"
+        "                         ('gateway', _restart_gateway)]:\n"
+        "            fn(topo)\n"
+        "            print(f'[{name}] status={topo[\"services\"][name][\"status\"]}')\n"
+        "    _write_topology(topo)\n"
+        "    statuses = [s['status'] for s in topo['services'].values()]\n"
+        "    return 0 if all(s in ('running', 'healthy') for s in statuses) else 1\n"
+        "\n"
+        "\n"
+        "if __name__ == '__main__':\n"
+        "    sys.exit(main())\n"
     )
-    assert 0.1 <= CONNECT_TIMEOUT <= 60.0, (
-        f"Config Error: CONNECT_TIMEOUT={{CONNECT_TIMEOUT}} is outside [0.1, 60.0]. "
-        "Too small (< 0.1) causes spurious timeouts under normal load. "
-        "Too large (> 60.0) masks real failures. Set to a value like {correct_timeout}."
+
+    # ── Initial service_state.json (all degraded/crashed) ────────────────────
+    initial_topology = _json.dumps({
+        "services": {
+            "db": {
+                "status": "crashed", "latency_ms": None, "depends_on": [],
+                "error_rate": 1.0, "restart_count": 0,
+                "last_error": f"CONNECT_TIMEOUT=0.001 below minimum 0.1 — all connections timing out",
+            },
+            "auth": {
+                "status": "degraded", "latency_ms": None, "depends_on": ["db"],
+                "error_rate": 0.70, "restart_count": 0,
+                "last_error": f"db unreachable; retry loop executing {max_retries+1} attempts (should be {max_retries})",
+            },
+            "gateway": {
+                "status": "degraded", "latency_ms": 9999, "depends_on": ["auth"],
+                "error_rate": 0.94, "restart_count": 0,
+                "last_error": "circuit_breaker CIRCUIT_BREAKER_THRESHOLD=1 opens on first failure",
+            },
+        }
+    }, indent=2)
+
+    # ── Pre-written cascade failure logs ─────────────────────────────────────
+    service_log_src = (
+        f"2026-01-01T00:00:01Z FATAL [db] CONNECT_TIMEOUT=0.001 below minimum 0.1s — "
+        "all DB connections timing out immediately\n"
+        f"2026-01-01T00:00:01Z ERROR [auth] Cannot reach db (timeout=0.001s); "
+        f"retry loop executed {max_retries+1} attempts instead of {max_retries} — range off-by-one\n"
+        "2026-01-01T00:00:01Z ERROR [gateway] circuit_breaker opened after 1 failure "
+        "(CIRCUIT_BREAKER_THRESHOLD=1) — threshold too aggressive\n"
+        "2026-01-01T00:00:02Z FATAL [gateway] Cascading failure: "
+        "db_timeout -> auth_degraded -> gateway_error_rate=94%\n"
     )
 
-
-def test_client_retries_exact_count():
-    \"\"\"Client must attempt exactly MAX_RETRIES times on persistent failure.\"\"\"
-    attempts = []
-
-    def always_fail():
-        attempts.append(1)
-        raise TimeoutError("simulated timeout")
-
-    client = ServiceClient("http://test")
-    client._do_request = lambda ep: always_fail()
-
-    with pytest.raises(TimeoutError):
-        client.request("/api", retries=MAX_RETRIES)
-
-    assert len(attempts) == MAX_RETRIES, (
-        f"Client Bug: expected {{MAX_RETRIES}} attempts (retries={{MAX_RETRIES}}), "
-        f"got {{len(attempts)}}. Fix: use range(retries) not range(retries + 1)."
-    )
-
-
-def test_circuit_stays_closed_on_isolated_failure():
-    \"\"\"A single transient failure must NOT open the circuit breaker.\"\"\"
-    cb = CircuitBreaker(failure_threshold={failure_threshold}, reset_timeout=9999.0)
-    failed = [False]
-
-    def flaky():
-        if not failed[0]:
-            failed[0] = True
-            raise RuntimeError("transient failure")
-        return "ok"
-
-    with pytest.raises(RuntimeError):
-        cb.call(flaky)
-
-    assert cb._state == "closed", (
-        "Circuit Breaker Bug: circuit opened after a single failure. "
-        "Fix: only open circuit after {failure_threshold} consecutive failures "
-        "(change '>=1' to '>= self.failure_threshold')."
-    )
-
-
-def test_circuit_opens_after_consecutive_failures():
-    \"\"\"Circuit must open after exactly {failure_threshold} consecutive failures.\"\"\"
-    cb = CircuitBreaker(failure_threshold={failure_threshold}, reset_timeout=9999.0)
-
-    def always_fail():
-        raise RuntimeError("persistent failure")
-
-    for _ in range({failure_threshold}):
-        try:
-            cb.call(always_fail)
-        except RuntimeError:
-            pass
-
-    assert cb._state == "open", (
-        f"Circuit Breaker Bug: circuit is still '{{cb._state}}' after "
-        "{failure_threshold} consecutive failures. "
-        "Fix: open when _failure_count >= self.failure_threshold."
-    )
-
-
-def test_circuit_fast_fails_when_open():
-    \"\"\"When circuit is open, call() must raise without invoking the function.\"\"\"
-    cb = CircuitBreaker(failure_threshold={failure_threshold}, reset_timeout=9999.0)
-
-    def always_fail():
-        raise RuntimeError("failure")
-
-    for _ in range({failure_threshold}):
-        try:
-            cb.call(always_fail)
-        except RuntimeError:
-            pass
-
-    calls = []
-    with pytest.raises(RuntimeError):
-        cb.call(lambda: calls.append(1) or "ok")
-
-    assert not calls, (
-        "Circuit Breaker Bug: function was invoked even though circuit is OPEN. "
-        "Fast-fail must raise immediately without calling the wrapped function."
-    )
-"""
-    test_src = test_template.format(
-        failure_threshold=failure_threshold,
-        correct_timeout=correct_timeout,
+    # ── Test suite ────────────────────────────────────────────────────────────
+    test_template = (
+        '"""Tests for INC-201: 3-service network timeout cascade.\n\n'
+        "Dependency chain: gateway --> auth --> db\n\n"
+        "Bug 1 (db):      CONNECT_TIMEOUT=0.001 — too low, cascades to all dependents.\n"
+        "                 TRAP: > 60.0 also fails. Valid range: [0.1, 60.0].\n"
+        f"Bug 2 (auth):    range(MAX_RETRIES + 1) — one extra retry attempt.\n"
+        f"Bug 3 (gateway): CIRCUIT_BREAKER_THRESHOLD=1 — opens on first failure.\n"
+        '"""\n'
+        "import json\n"
+        "import os\n"
+        "import pytest\n"
+        "from services.db.config import CONNECT_TIMEOUT\n"
+        "from services.auth.config import MAX_RETRIES\n"
+        "from services.auth.client import connect_with_retry\n"
+        "from services.gateway.circuit_breaker import CircuitBreaker\n"
+        "from services.gateway.config import CIRCUIT_BREAKER_THRESHOLD\n"
+        "\n"
+        "\n"
+        "def test_db_timeout_in_valid_range():\n"
+        '    """CONNECT_TIMEOUT must be in [0.1, 60.0]."""\n'
+        "    assert isinstance(CONNECT_TIMEOUT, (int, float)), (\n"
+        '        "CONNECT_TIMEOUT must be a number."\n'
+        "    )\n"
+        "    assert 0.1 <= CONNECT_TIMEOUT <= 60.0, (\n"
+        "        f\"CONNECT_TIMEOUT={CONNECT_TIMEOUT} is outside [0.1, 60.0]. \"\n"
+        f"        \"Too small cascades timeouts; too large masks failures. \"\n"
+        f"        \"Fix: set to a value like {correct_timeout} in services/db/config.py\"\n"
+        "    )\n"
+        "\n"
+        "\n"
+        "def test_auth_retries_exact_count():\n"
+        '    """Auth client must make exactly MAX_RETRIES attempts."""\n'
+        "    result = connect_with_retry()\n"
+        "    assert result['attempts'] == result['expected'], (\n"
+        "        f\"Expected {result['expected']} attempts, got {result['attempts']}. \"\n"
+        "        \"Fix: change range(MAX_RETRIES + 1) to range(MAX_RETRIES) \"\n"
+        "        \"in services/auth/client.py\"\n"
+        "    )\n"
+        "\n"
+        "\n"
+        "def test_circuit_stays_closed_on_isolated_failure():\n"
+        '    """A single failure must NOT open the circuit breaker."""\n'
+        "    cb = CircuitBreaker()\n"
+        "    def _fail():\n"
+        "        raise RuntimeError('transient')\n"
+        "    try:\n"
+        "        cb.call(_fail)\n"
+        "    except RuntimeError:\n"
+        "        pass\n"
+        "    assert cb._state == 'closed', (\n"
+        "        f'Circuit opened after 1 failure '\n"
+        "        f'(CIRCUIT_BREAKER_THRESHOLD={CIRCUIT_BREAKER_THRESHOLD}). '\n"
+        f"        'Fix: set CIRCUIT_BREAKER_THRESHOLD = {failure_threshold} '\n"
+        "        'in services/gateway/config.py'\n"
+        "    )\n"
+        "\n"
+        "\n"
+        "def test_circuit_opens_after_consecutive_failures():\n"
+        f'    """Circuit must open after {failure_threshold} consecutive failures."""\n'
+        "    cb = CircuitBreaker()\n"
+        "    def _fail():\n"
+        "        raise RuntimeError('persistent')\n"
+        "    for _ in range(CIRCUIT_BREAKER_THRESHOLD):\n"
+        "        try:\n"
+        "            cb.call(_fail)\n"
+        "        except RuntimeError:\n"
+        "            pass\n"
+        "    assert cb._state == 'open', (\n"
+        "        f'Circuit still {cb._state!r} after {CIRCUIT_BREAKER_THRESHOLD} failures.'\n"
+        "    )\n"
+        "\n"
+        "\n"
+        "def test_service_topology_all_running():\n"
+        '    """All 3 services must show status=running after targeted restarts.\n\n'
+        "    Workflow:\n"
+        "      1. Fix services/db/config.py   (CONNECT_TIMEOUT in [0.1, 60.0])\n"
+        "      2. Fix services/auth/client.py (range(MAX_RETRIES + 1) -> range(MAX_RETRIES))\n"
+        "      3. Fix services/gateway/config.py (CIRCUIT_BREAKER_THRESHOLD = correct value)\n"
+        "      4. Call restart_service (optionally with --service flag per dependency order)\n"
+        "      5. This test then passes.\n"
+        '    """\n'
+        "    assert os.path.isfile('service_state.json'), (\n"
+        "        \"service_state.json not found. Fix all 3 bugs then call restart_service.\"\n"
+        "    )\n"
+        "    with open('service_state.json') as f:\n"
+        "        state = json.load(f)\n"
+        "    assert 'services' in state, \"service_state.json must contain a 'services' topology dict\"\n"
+        "    for name in ('db', 'auth', 'gateway'):\n"
+        "        svc = state['services'].get(name, {})\n"
+        "        status = svc.get('status', 'unknown')\n"
+        "        assert status in ('running', 'healthy'), (\n"
+        "            f\"Service '{name}' not healthy: status={status!r}. \"\n"
+        "            f\"last_error={svc.get('last_error', 'none')!r}. \"\n"
+        "            \"Use inspect_logs (with service_name='db'/'auth'/'gateway') to diagnose. \"\n"
+        "            \"Fix order: db -> auth -> gateway.\"\n"
+        "        )\n"
     )
 
     return {
-        "config/__init__.py": "",
-        "config/network.py": network_src,
-        "services/__init__.py": "",
-        "services/client.py": client_src,
-        "services/circuit_breaker.py": cb_src,
-        "tests/__init__.py": "",
-        "tests/test_network.py": test_src,
+        "services/__init__.py":               "",
+        "services/db/__init__.py":            db_init,
+        "services/db/config.py":              db_config_src,
+        "services/db/client.py":              db_client_src,
+        "services/auth/__init__.py":          auth_init,
+        "services/auth/config.py":            auth_config_src,
+        "services/auth/client.py":            auth_client_src,
+        "services/gateway/__init__.py":       gw_init,
+        "services/gateway/config.py":         gw_config_src,
+        "services/gateway/circuit_breaker.py": gw_cb_src,
+        "app_init.py":                        app_init_src,
+        "service_state.json":                 initial_topology,
+        "service.log":                        service_log_src,
+        "tests/__init__.py":                  "",
+        "tests/test_network.py":              test_template,
     }
 
 
@@ -2209,19 +2468,33 @@ TASKS: List[Dict[str, Any]] = [
     {
         "task_id": "task_10_pr",
         "description": (
-            "INC-201: Cascading timeout failures across all services after a config "
-            "change. Three bugs: CONNECT_TIMEOUT is 0.001 s (causes spurious "
-            "timeouts — but setting it > 60.0 also breaks the range test), "
-            "ServiceClient retries one too many times (range off-by-one), and "
-            "CircuitBreaker opens after just 1 failure instead of the configured "
-            "threshold. Fix all three bugs so the tests pass."
+            "INC-201: 3-service topology (gateway → auth → db) is fully down after "
+            "a config push. Three bugs across services: db/config.py CONNECT_TIMEOUT "
+            "is 0.001 s (valid range: 0.1–60.0), auth/client.py retries one too many "
+            "times (range off-by-one), gateway/circuit_breaker.py opens after just "
+            "1 failure instead of the configured threshold. Use inspect_logs to trace "
+            "the cascade. Fix bugs in dependency order (db → auth → gateway), "
+            "call restart_service for each service, then submit."
         ),
         "_repo_factory": _make_task_10_repo,
-        "_diagnosis_keywords": frozenset({
-            "timeout", "connect_timeout", "range", "retries", "off-by-one",
-            "circuit", "consecutive", "threshold", "failure_threshold", "cascade",
-        }),
-        "_optimal_steps": 6,
+        "_diagnosis_keywords": {
+            "affected_service": frozenset({
+                "db", "database", "connect_timeout", "timeout", "auth", "gateway",
+            }),
+            "root_cause": frozenset({
+                "threshold", "circuit_breaker", "range", "retries", "off-by-one",
+                "connect_timeout", "0.001", "consecutive",
+            }),
+            "propagation": frozenset({
+                "cascade", "upstream", "downstream", "auth", "gateway",
+                "flood", "degraded", "worsened",
+            }),
+            "remediation": frozenset({
+                "db_first", "dependency", "order", "sequential", "restart",
+                "topology", "bottom-up",
+            }),
+        },
+        "_optimal_steps": 7,
     },
 ]
 

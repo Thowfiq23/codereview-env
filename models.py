@@ -50,6 +50,13 @@ class AgentAction(BaseModel):
         description="Complete new content to write to target_file"
     )
 
+    # restart_service / inspect_logs (task 10 topology)
+    service_name: Optional[str] = Field(
+        None,
+        description="For task 10 topology: target service for restart_service or inspect_logs. "
+                    "One of: 'db', 'auth', 'gateway'. Omit to act on all services."
+    )
+
     # submit_fix / submit_review
     summary: Optional[str] = Field(
         None,

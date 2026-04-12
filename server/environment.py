@@ -32,7 +32,7 @@ _PYTEST_CONTROL_NAMES = frozenset({
 })
 
 # Tasks that include a service component (have app_init.py + state artifacts).
-_SERVICE_TASKS = frozenset({"task_7_pr", "task_8_pr", "task_9_pr"})
+_SERVICE_TASKS = frozenset({"task_7_pr", "task_8_pr", "task_9_pr", "task_10_pr"})
 
 
 def _make_clean_env(pythonpath: str) -> Dict[str, str]:
@@ -226,7 +226,26 @@ class CodeReviewEnvironment:
             except Exception:
                 return "unknown"
 
-        # For code tasks (1-6, 10): use pass rate as proxy
+        if task_id == "task_10_pr":
+            state_path = os.path.join(self.workspace_dir, "service_state.json")
+            if os.path.isfile(state_path):
+                try:
+                    with open(state_path, encoding="utf-8") as f:
+                        topo = json.load(f)
+                    services = topo.get("services", {})
+                    if not services:
+                        return "unknown"
+                    statuses = [svc.get("status", "crashed") for svc in services.values()]
+                    if all(s in ("running", "healthy") for s in statuses):
+                        return "healthy"
+                    if any(s in ("running", "healthy") for s in statuses):
+                        return "degraded"
+                    return "crashed"
+                except Exception:
+                    return "unknown"
+            return "crashed"
+
+        # For pure code tasks (1-6): use pass rate as proxy
         rate = self._get_test_pass_rate()
         if rate >= 1.0:
             return "healthy"
@@ -238,6 +257,26 @@ class CodeReviewEnvironment:
         """Collect structured logs and service status from workspace artifacts."""
         logs: List[Dict[str, str]] = []
         service_status: Optional[Dict[str, Any]] = None
+
+        # task_10: topology logs live in per-service subdirectories
+        if self.state.task_id == "task_10_pr":
+            for svc_name in ("db", "auth", "gateway"):
+                svc_log = os.path.join(
+                    self.workspace_dir, "services", svc_name, "service.log"
+                )
+                if os.path.isfile(svc_log):
+                    entries = _parse_log_file(svc_log)
+                    for e in entries:
+                        e["service"] = svc_name
+                    logs.extend(entries)
+            state_path = os.path.join(self.workspace_dir, "service_state.json")
+            if os.path.isfile(state_path):
+                try:
+                    with open(state_path, encoding="utf-8") as f:
+                        service_status = json.load(f)
+                except Exception:
+                    pass
+            return logs[-50:], service_status
 
         for fname in ("service.log", "migration.log", "app.log"):
             fpath = os.path.join(self.workspace_dir, fname)
@@ -305,11 +344,22 @@ class CodeReviewEnvironment:
         test_quality = float(pytest_pass_rate)
 
         # 2. Diagnosis quality — keyword match
-        keywords: frozenset = self.current_task_data.get("_diagnosis_keywords", frozenset())
+        # Supports both flat frozenset (tasks 1-9) and grouped dict (task 10).
+        # Grouped dict: {group_name: frozenset(keywords)}
+        # Score = fraction of groups with ≥1 keyword hit (more robust than raw overlap).
+        keywords = self.current_task_data.get("_diagnosis_keywords", frozenset())
         if keywords and root_cause:
             rc_lower = root_cause.lower()
-            matched = sum(1 for kw in keywords if kw.lower() in rc_lower)
-            diagnosis = min(matched / max(len(keywords), 1), 1.0)
+            if isinstance(keywords, dict):
+                groups = list(keywords.values())
+                hits = sum(
+                    1 for group in groups
+                    if any(kw.lower() in rc_lower for kw in group)
+                )
+                diagnosis = hits / max(len(groups), 1)
+            else:
+                matched = sum(1 for kw in keywords if kw.lower() in rc_lower)
+                diagnosis = min(matched / max(len(keywords), 1), 1.0)
         else:
             diagnosis = 0.0
 
@@ -576,12 +626,32 @@ class CodeReviewEnvironment:
 
             # ── TOOL: inspect_logs ────────────────────────────────────────────
             elif action_obj.action_type == "inspect_logs":
-                log_names = ["service.log", "migration.log", "app.log"]
-                found = []
-                for fname in log_names:
-                    fpath = os.path.join(self.workspace_dir, fname)
-                    if os.path.isfile(fpath):
-                        found.append((fname, fpath))
+                # task_10: per-service log files; optional service_name filter
+                if self.state.task_id == "task_10_pr":
+                    svc_filter = getattr(action_obj, "service_name", None)
+                    svc_names = (
+                        [svc_filter]
+                        if svc_filter and svc_filter in ("db", "auth", "gateway")
+                        else ["db", "auth", "gateway"]
+                    )
+                    found = []
+                    for svc in svc_names:
+                        svc_log = os.path.join(
+                            self.workspace_dir, "services", svc, "service.log"
+                        )
+                        if os.path.isfile(svc_log):
+                            found.append((f"services/{svc}/service.log", svc_log))
+                    # also include root-level service.log if present
+                    root_log = os.path.join(self.workspace_dir, "service.log")
+                    if os.path.isfile(root_log):
+                        found.append(("service.log", root_log))
+                else:
+                    log_names = ["service.log", "migration.log", "app.log"]
+                    found = []
+                    for fname in log_names:
+                        fpath = os.path.join(self.workspace_dir, fname)
+                        if os.path.isfile(fpath):
+                            found.append((fname, fpath))
 
                 if not found:
                     obs_result = (
@@ -693,15 +763,24 @@ class CodeReviewEnvironment:
                 if not os.path.isfile(app_init_path):
                     obs_result = (
                         "Error: app_init.py not found in workspace root. "
-                        "This action only applies to service/database tasks (7-9)."
+                        "This action only applies to service/database tasks (7-10)."
                     )
                     reward = 0.005
                 else:
                     prev_health = self._detect_system_health()
 
+                    # task_10: support targeted --service flag
+                    svc_arg = getattr(action_obj, "service_name", None)
+                    if (self.state.task_id == "task_10_pr"
+                            and svc_arg
+                            and svc_arg in ("db", "auth", "gateway")):
+                        run_cmd = f"python app_init.py --service {svc_arg}"
+                    else:
+                        run_cmd = "python app_init.py"
+
                     try:
                         result = subprocess.run(
-                            "python app_init.py",
+                            run_cmd,
                             cwd=self.workspace_dir, shell=True,
                             capture_output=True, text=True, timeout=15, env=env,
                             start_new_session=True,

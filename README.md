@@ -416,7 +416,7 @@ curl http://localhost:7860/metadata
 # JSON schemas (action / observation / state)
 curl http://localhost:7860/schema
 
-# Start a new episode (cycles through tasks: 1 → 2 → 3 → 1 → …)
+# Start a new episode (cycles through tasks: 1 → 2 → 3 → 4 → 5 → 1 → …)
 curl -X POST http://localhost:7860/reset
 
 # Execute a bash command

@@ -32,5 +32,12 @@ py-modules = ["client", "models", "tasks", "inference"]
 where = ["."]
 include = ["server*"]
 
+[tool.pytest.ini_options]
+# Restrict discovery to the project test suite only.
+# Without this, pytest walks into sandbox scratch dirs
+# (tmp_judge_workspaces/, tmp_test_run/, codereview_workspaces/, etc.)
+# and picks up agent-generated test files, poisoning the test run.
+testpaths = ["tests"]
+
 [project.scripts]
 server = "server.app:main"

@@ -213,7 +213,7 @@ The reward is **dense and delta-based** — `patch_file` rewards are proportiona
 | `patch_file` — security violation | `−0.05` | Path traversal, test tampering, conftest injection |
 | `submit_review` — all tests pass | `0.99` | Full credit, terminal |
 | `submit_review` — partial pass | `0.01 – 0.98` | `0.01 + pass_rate × 0.97` |
-| Max steps (10) exceeded | terminal at floor | Episode auto-terminates |
+| Max steps (10) exceeded | last action's reward | Episode terminates; no forced floor |
 
 **The 0.89 cap on `patch_file`** creates an intentional submit incentive: even a perfect patch earns 0.89; the agent must call `submit_review` to reach 0.99. This penalises "patch and stall" strategies.
 
@@ -370,17 +370,17 @@ All tasks use **parametric factories** — each episode reset generates a fresh 
 
 ### task_6_pr — the coupling trap in detail
 
-The reward curve for a greedy agent on task_6:
+The reward trajectory for the most natural greedy path through task_6 (measured):
 
-| Agent action | Pass rate | Reward | What happened |
-|---|---|---|---|
-| Initial (bugs present) | 5/7 = 0.71 | — | `test_rank_best_match_first` passes by accident |
-| Fix `scorer.py` only | 5/7 = 0.71 | ≈ 0.64 | Positive delta from 0→0.71, but ranking test **regresses** |
-| Fix `ranker.py` only | 4/7 = 0.57 | ≈ 0.50 | Scores are still wrong; short doc ranks first |
-| Fix both `scorer` + `ranker` | 6/7 = 0.86 | ≈ 0.75 | Coupling resolved; tokenizer still wrong |
-| Fix all three files | 7/7 = 1.0 | 0.99 | Full suite green |
+| Step | Action | Pass rate | Step reward | What happened |
+|------|--------|-----------|-------------|---------------|
+| 0 | — (episode start) | 5/7 = 0.71 | — | `test_rank_best_match_first` passes by accident |
+| 1 | `patch_file scorer.py` | 5/7 = 0.71 | **0.6386** | Delta 0→0.71 earns positive reward, but ranking test **regresses** |
+| 2 | `patch_file ranker.py` | 6/7 = 0.86 | **0.1358** | Delta 0.71→0.86; coupling resolved, tokenizer still wrong |
+| 3 | `patch_file indexer.py` | 7/7 = 1.0 | **0.1358** | Delta 0.86→1.0; all bugs fixed |
+| 4 | `submit_review` | — | **0.99** | Full suite green; episode ends |
 
-A standard one-file-at-a-time loop earns reward ≈ 0.64 on the scorer patch, then discovers a regression on the next pytest run. It either submits early at ≈ 0.70 or burns the remaining steps without converging. The agent must hold the regression in working memory and patch both `scorer.py` and `ranker.py` in a coordinated step.
+The trap is not a missing reward signal — step 1 earns a healthy 0.64. The problem is that after step 1, a pytest run reveals `test_rank_best_match_first` has regressed. An agent that submits at this point scores ≈ 0.70 (partial credit). One that reads the regression, understands it requires fixing `ranker.py` too, and continues earns full credit — but it must resist the urge to submit after the first positive reward.
 
 > **RL signal note:** Step 5 of task_3 demonstrates the grader enforcing semantic correctness: a syntactically valid `def process_payment` (without `async`) earns floor reward — the AST check rejects it. The agent self-corrects on step 6 to `async def` and earns `0.89`. The same grader strictness applies across all tasks.
 
@@ -485,7 +485,7 @@ class ReviewState(BaseModel):
     task_id:             str    # Which task is active
     step_count:          int    # Steps consumed
     current_task_index:  int    # Position in task cycle (0–5)
-    total_reward:        float  # Best patch reward achieved so far this episode
+    total_reward:        float  # Highest reward achieved this episode (any action type)
     done:                bool   # True when episode has ended
 ```
 

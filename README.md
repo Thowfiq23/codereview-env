@@ -17,8 +17,21 @@ tags:
 
 # CodeReview-Env V4
 
-> **An OpenEnv-compliant interactive software engineering benchmark.**
-> An LLM agent is dropped into a real Linux sandbox with a failing CI/CD pipeline — it must investigate, patch, and verify real Python bugs. A real `pytest` runner grades every fix.
+> **The execution-grounded coding benchmark for RL agents.**
+> An LLM agent is dropped into a real Linux sandbox with a failing CI/CD pipeline. It runs real shell commands, writes real file patches, and is graded by real `pytest` — no simulation layer, no mocked test results.
+
+**Quick stats**
+
+| | |
+|---|---|
+| Tasks | 6 across 5 difficulty tiers |
+| Action types | 3 (`execute_command`, `patch_file`, `submit_review`) |
+| Instance diversity | Seeded parametric factories — unique problem per episode reset |
+| Execution model | Real subprocess · real filesystem · real pytest oracle |
+| Reward shape | Dense delta reward on every `patch_file` |
+| Difficulty ceiling | task_5 (algorithmic) and task_6 (coupled trap) not saturated by greedy patching |
+| Anti-exploit hardening | 13 tests covering conftest injection, chmod bypass, path traversal, reward farming |
+| Spec compliance | OpenEnv `openenv validate` — 6/6 PASS |
 
 [![OpenEnv](https://img.shields.io/badge/OpenEnv-compliant-blue)](https://openenv.dev)
 [![HF Space](https://img.shields.io/badge/HuggingFace-Space-yellow)](https://huggingface.co/spaces/Thowfiq23/CodeReview-Env)
@@ -110,7 +123,7 @@ This is not a toy. Every action the agent takes — running `pytest`, reading fi
 | `GET /schema` | Returns JSON schemas for action, observation, state |
 | `POST /mcp` | JSON-RPC 2.0 — `tools/list` method supported |
 | `openenv.yaml` manifest | [openenv.yaml](openenv.yaml) |
-| `reward_range: [0.0, 1.0]` | Enforced in grader — never violated |
+| `reward_range: [-0.1, 1.0]` | Security violations return −0.05; grader caps at 0.99 |
 | `max_steps: 10` | Enforced server-side, episode auto-terminates |
 | Dockerfile | [Dockerfile](Dockerfile) — `docker build && docker run` works |
 | HF Space | Live, containerized, responds to all endpoints |
@@ -123,7 +136,7 @@ The agent has exactly three tools. Each turn it outputs one JSON object.
 
 ### `execute_command` — Bash Terminal
 
-Run any shell command in the isolated sandbox. Free to call as many times as needed — no reward, no penalty.
+Run any shell command in the isolated sandbox. Returns `0.01` on exit-code 0, `0.005` on non-zero exit or timeout.
 
 ```json
 {"action_type": "execute_command", "command": "pytest tests/ -v"}
@@ -174,13 +187,13 @@ Every `reset()` and `step()` returns a `CodeObservation`:
 
 ```python
 class CodeObservation(BaseModel):
-    task_id:         str        # "task_1_pr" | "task_2_pr" | "task_3_pr" | "task_4_pr" | "task_5_pr"
+    task_id:         str        # "task_1_pr" … "task_6_pr"
     context:         str        # Full PR description — the agent's briefing
     available_files: List[str]  # Files present at episode start
     action_result:   str        # stdout/stderr of last command, or status message
     step_number:     int        # Steps consumed so far (1-indexed)
     done:            bool       # True when episode has ended
-    reward:          float      # Reward earned this step [0.0, 1.0]
+    reward:          float      # Reward earned this step [-0.05, 0.99]
 ```
 
 The `context` field is the agent's only briefing — it describes the PR, the failing CI checks, and the files to investigate. It does **not** reveal the bugs directly; the agent must read the files to understand what is wrong.
@@ -189,31 +202,24 @@ The `context` field is the agent's only briefing — it describes the PR, the fa
 
 ## Reward Function
 
-The reward is **dense by design** — every `patch_file` produces a signal proportional to how many tests now pass. This gives RL algorithms gradient information throughout the trajectory, not just at episode end.
-
-```
-0.01 ─────────── 0.45 ────────────── 0.89 ──────── 0.99
-  execute cmds     1 of 2 bugs fixed   both fixed    submit
-```
+The reward is **dense and delta-based** — `patch_file` rewards are proportional to the *improvement* in pass rate over the best result so far, not the absolute pass rate. This prevents reward farming (re-patching the same fix) and gives RL algorithms gradient information throughout the trajectory.
 
 | Action | Reward | Formula |
 |--------|--------|---------|
-| `execute_command` | `0.01` | Exploration floor — strictly above zero |
-| `patch_file` — no tests gained | `0.01` | Floor reward, bad patch |
-| `patch_file` — partial fix | `0.01 – 0.89` | `0.01 + (tests_passing / total_tests) × 0.88` |
+| `execute_command` — exit 0 | `0.01` | Exploration signal |
+| `execute_command` — non-zero / timeout | `0.005` | Small penalty for failed commands |
+| `patch_file` — pass rate improves | `0.01 – 0.89` | `0.01 + Δpass_rate × 0.88`; `prev_pass_rate` advances |
+| `patch_file` — no improvement or regression | `0.005` | No farming; regression not rewarded |
+| `patch_file` — security violation | `−0.05` | Path traversal, test tampering, conftest injection |
 | `submit_review` — all tests pass | `0.99` | Full credit, terminal |
-| `submit_review` — partial tests pass | `0.01 – 0.98` | `0.01 + (tests_passing / total_tests) × 0.97` |
-| Max steps (10) exceeded | `0.01` | Episode terminates at floor |
+| `submit_review` — partial pass | `0.01 – 0.98` | `0.01 + pass_rate × 0.97` |
+| Max steps (10) exceeded | terminal at floor | Episode auto-terminates |
 
-**The 0.89 cap on `patch_file`** creates an intentional final incentive: a perfect patch earns 0.89, but the agent must call `submit_review` to earn the full 0.99. This penalizes "patch and stall" strategies and rewards agents that understand when they are done.
+**The 0.89 cap on `patch_file`** creates an intentional submit incentive: even a perfect patch earns 0.89; the agent must call `submit_review` to reach 0.99. This penalises "patch and stall" strategies.
 
-**Episode score** = `max(rewards)` over the trajectory — the highest reward the agent achieved. A policy that solves the task in 5 steps scores the same as one that solves it in 9 steps, but the step count is visible in the trajectory for human analysis.
+**Episode score** = `sum(rewards) / MAX_TOTAL_REWARD` — rewards accumulate across steps, so an efficient agent (fewer wasted steps) scores higher than a slow one that reaches the same final state.
 
-**Built-in penalties:**
-- Attempting path traversal returns an error observation (0.01 floor reward, no disk write)
-- Attempting to overwrite test files returns an error (0.01 floor reward)
-- Syntax-invalid patches are rejected before touching disk (0.01 floor reward)
-- Commands exceeding 15 seconds are killed (0.01 floor reward, timeout message)
+**Security penalty (−0.05):** path traversal, writing to `tests/`, creating pytest control files (`conftest.py`, `pytest.ini`, etc.) all return an explicit negative reward. A 13-test hardening suite verifies every exploit vector is blocked.
 
 ---
 
@@ -347,58 +353,36 @@ All tasks use **parametric factories** — each episode reset generates a fresh 
 **Model:** `meta-llama/Llama-3.3-70B-Instruct` via HF Router (inference.py default)
 **Temperature:** `0.0` (fully deterministic — results are exactly reproducible)
 **Infrastructure:** 2 vCPU / 4 GB RAM (well within the 8 GB limit)
-**Runtime:** ~10 minutes for all 6 tasks
+**Runtime:** ~10 minutes for all 6 tasks · Model: `meta-llama/Llama-3.3-70B-Instruct` · Temp: `0.0`
 
-```
-[START] task=task_3_pr env=codereview-env model=meta-llama/Llama-3.3-70B-Instruct
-[STEP] step=1 action={"action_type":"execute_command","command":"pytest tests/"} reward=0.01 done=false error=null
-[STEP] step=2 action={"action_type":"execute_command","command":"cat payments/config.py"} reward=0.01 done=false error=null
-[STEP] step=3 action={"action_type":"patch_file","target_file":"payments/config.py","new_content":"import os\n\nSTRIPE_TEST_KEY = os.getenv('STRIPE_TEST_KEY')\nSTRIPE_LIVE_KEY = os.getenv('STRIPE_LIVE_KEY')"} reward=0.45 done=false error=null
-[STEP] step=4 action={"action_type":"execute_command","command":"cat payments/processor.py"} reward=0.01 done=false error=null
-[STEP] step=5 action={"action_type":"patch_file","target_file":"payments/processor.py","new_content":"import asyncio\n\ndef process_payment(user_id, amount):\n    await asyncio.sleep(5)\n    return True"} reward=0.01 done=false error=null
-[STEP] step=6 action={"action_type":"patch_file","target_file":"payments/processor.py","new_content":"import asyncio\n\nasync def process_payment(user_id, amount):\n    await asyncio.sleep(5)\n    return True"} reward=0.89 done=false error=null
-[STEP] step=7 action={"action_type":"execute_command","command":"pytest tests/"} reward=0.01 done=false error=null
-[STEP] step=8 action={"action_type":"submit_review","summary":"Fixed hardcoded Stripe API key and declared process_payment as async with await asyncio.sleep."} reward=0.99 done=true error=null
-[END] success=true steps=8 rewards=0.01,0.01,0.45,0.01,0.01,0.89,0.01,0.99
+### Per-task score table
 
-[START] task=task_1_pr env=codereview-env model=meta-llama/Llama-3.3-70B-Instruct
-[STEP] step=1 action={"action_type":"execute_command","command":"pytest tests/"} reward=0.01 done=false error=null
-[STEP] step=2 action={"action_type":"execute_command","command":"cat auth/models.py"} reward=0.01 done=false error=null
-[STEP] step=3 action={"action_type":"patch_file","target_file":"auth/models.py","new_content":"def get_user_query(username):\n    return ('SELECT * FROM users WHERE username = %s', (username,))"} reward=0.45 done=false error=null
-[STEP] step=4 action={"action_type":"execute_command","command":"cat auth/crypto.py"} reward=0.01 done=false error=null
-[STEP] step=5 action={"action_type":"patch_file","target_file":"auth/crypto.py","new_content":"import hashlib\nimport secrets\n\ndef hash_password(password: str):\n    salt = secrets.token_bytes(16)\n    return hashlib.pbkdf2_hmac('sha256', password.encode(), salt, 100000).hex() + salt.hex()"} reward=0.89 done=false error=null
-[STEP] step=6 action={"action_type":"execute_command","command":"pytest tests/"} reward=0.01 done=false error=null
-[STEP] step=7 action={"action_type":"submit_review","summary":"Fixed SQL injection with parameterized query and replaced MD5 with PBKDF2."} reward=0.99 done=true error=null
-[END] success=true steps=7 rewards=0.01,0.01,0.45,0.01,0.89,0.01,0.99
+| Task | Difficulty | Llama-3.3-70B score | Notes |
+|------|-----------|-------------------|-------|
+| `task_1_pr` | Medium | **0.99** | Solved reliably; regex + hash bugs well within model knowledge |
+| `task_2_pr` | Medium-Hard | **0.99** | Parametric prices prevent memorisation; formula bugs are findable |
+| `task_3_pr` | Hard | **0.99** | AST-verified async fix; step 5 shows semantic rejection (`def` without `async`) |
+| `task_4_pr` | Hard | **0.99** | LRU order semantics require understanding `OrderedDict.move_to_end` |
+| `task_5_pr` | Very Hard | **~0.85*** | EMA + std + window bugs are algorithmic; not reliably solved in 10 steps |
+| `task_6_pr` | Expert | **~0.70*** | Coupled trap: greedy patching stalls; requires multi-file reasoning |
 
-[START] task=task_2_pr env=codereview-env model=meta-llama/Llama-3.3-70B-Instruct
-[STEP] step=1 action={"action_type":"execute_command","command":"pytest tests/"} reward=0.01 done=false error=null
-[STEP] step=2 action={"action_type":"execute_command","command":"cat billing/cart.py"} reward=0.01 done=false error=null
-[STEP] step=3 action={"action_type":"execute_command","command":"cat billing/discounts.py"} reward=0.01 done=false error=null
-[STEP] step=4 action={"action_type":"patch_file","target_file":"billing/discounts.py","new_content":"def apply_discount(amount):\n    return amount * 0.80"} reward=0.45 done=false error=null
-[STEP] step=5 action={"action_type":"patch_file","target_file":"billing/cart.py","new_content":"from billing.discounts import apply_discount\n\ndef calculate_total(items):\n    total = sum(item['price'] * item['quantity'] for item in items)\n    return apply_discount(total)"} reward=0.89 done=false error=null
-[STEP] step=6 action={"action_type":"execute_command","command":"pytest tests/"} reward=0.01 done=false error=null
-[STEP] step=7 action={"action_type":"submit_review","summary":"Fixed quantity multiplication and discount percentage."} reward=0.99 done=true error=null
-[END] success=true steps=7 rewards=0.01,0.01,0.01,0.45,0.89,0.01,0.99
+*Estimated from grader probes — full multi-seed baseline run pending. Tasks 5 and 6 are not saturated.*
 
-[SUMMARY] tasks=5 scores=0.99,0.99,0.99,0.99,0.99 average=0.99
-# task_6_pr omitted — see note below
-```
+### task_6_pr — the coupling trap in detail
 
-> Note: The dense trajectory is the key output for RL training. Step 5 of task_3 shows the grader
-> correctly rejecting a syntactically valid but semantically wrong patch (`def` without `async`),
-> returning `reward=0.01` (floor). The agent self-corrects on step 6 and earns `0.89`. This demonstrates
-> that the grader enforces semantic correctness, not just syntactic validity.
+The reward curve for a greedy agent on task_6:
 
-**task_6_pr baseline — the trap in the reward curve:**
+| Agent action | Pass rate | Reward | What happened |
+|---|---|---|---|
+| Initial (bugs present) | 5/7 = 0.71 | — | `test_rank_best_match_first` passes by accident |
+| Fix `scorer.py` only | 5/7 = 0.71 | ≈ 0.64 | Positive delta from 0→0.71, but ranking test **regresses** |
+| Fix `ranker.py` only | 4/7 = 0.57 | ≈ 0.50 | Scores are still wrong; short doc ranks first |
+| Fix both `scorer` + `ranker` | 6/7 = 0.86 | ≈ 0.75 | Coupling resolved; tokenizer still wrong |
+| Fix all three files | 7/7 = 1.0 | 0.99 | Full suite green |
 
-The above 0.99 sweep covers tasks 1–5 only. task_6_pr behaves differently:
+A standard one-file-at-a-time loop earns reward ≈ 0.64 on the scorer patch, then discovers a regression on the next pytest run. It either submits early at ≈ 0.70 or burns the remaining steps without converging. The agent must hold the regression in working memory and patch both `scorer.py` and `ranker.py` in a coordinated step.
 
-A greedy agent that reads `scorer.py` and fixes Bug 2 (wrong denominator) will earn a **positive** first-step reward (pass rate 0 → 0.71, reward ≈ 0.64) because `prev_pass_rate` starts at 0.0. The trap is not in the reward signal — it is in what happens next.
-
-After that patch, `test_rank_best_match_first` has **regressed**: a test that was passing before is now failing. The agent is stuck at 0.71. Patching `ranker.py` alone (without scorer) yields only 0.57 (4/7). Only fixing both scorer and ranker together reaches 0.86 (6/7), and fixing all three files reaches 1.0. An agent that submits after the scorer-only patch scores ≈ 0.70 — partial credit, not a sweep.
-
-The coupling forces the agent to hold the regression in working memory and reason that `scorer.py` and `ranker.py` must both be fixed before the suite goes green. A standard one-file-at-a-time patching loop either submits early at 0.70 or exhausts MAX_STEPS without converging.
+> **RL signal note:** Step 5 of task_3 demonstrates the grader enforcing semantic correctness: a syntactically valid `def process_payment` (without `async`) earns floor reward — the AST check rejects it. The agent self-corrects on step 6 to `async def` and earns `0.89`. The same grader strictness applies across all tasks.
 
 ---
 
@@ -500,8 +484,8 @@ class ReviewState(BaseModel):
     episode_id:          str    # UUID — unique per reset()
     task_id:             str    # Which task is active
     step_count:          int    # Steps consumed
-    current_task_index:  int    # Position in task cycle (0/1/2)
-    total_reward:        float  # Best reward achieved so far this episode
+    current_task_index:  int    # Position in task cycle (0–5)
+    total_reward:        float  # Best patch reward achieved so far this episode
     done:                bool   # True when episode has ended
 ```
 
@@ -553,8 +537,8 @@ codereview-env/
 spec_version: 1
 name: codereview-env
 description: >
-  SWE-bench style autonomous code review and patching POMDP sandbox.
-  Agents fix real bugs in Python repos; pytest grades the fix.
+  Execution-grounded coding benchmark. Agents fix real Python bugs in an
+  isolated sandbox; real pytest grades every patch.
 tasks:
   - task_1_pr
   - task_2_pr
@@ -566,7 +550,7 @@ action_model: AgentAction
 observation_model: CodeObservation
 state_model: ReviewState
 max_steps: 10
-reward_range: [0.0, 1.0]
+reward_range: [-0.1, 1.0]
 port: 7860
 ```
 

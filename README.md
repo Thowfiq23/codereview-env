@@ -394,9 +394,11 @@ All tasks use **parametric factories** — each episode reset generates a fresh 
 
 The above 0.99 sweep covers tasks 1–5 only. task_6_pr behaves differently:
 
-A greedy agent that reads `scorer.py`, fixes Bug 2 (wrong denominator), and runs pytest will see `test_rank_best_match_first` **regress** — a previously-passing test now fails. The pass rate drops from 5/7 → 5/7 (same count, different tests), so the delta reward is near-zero or negative on that step.
+A greedy agent that reads `scorer.py` and fixes Bug 2 (wrong denominator) will earn a **positive** first-step reward (pass rate 0 → 0.71, reward ≈ 0.64) because `prev_pass_rate` starts at 0.0. The trap is not in the reward signal — it is in what happens next.
 
-Concretely: patching `scorer.py` alone yields `test_pass_rate ≈ 0.71` (5 of 7); patching only `ranker.py` alone yields `test_pass_rate ≈ 0.57` (4 of 7); only fixing both together reaches `0.86` (6 of 7), and all three files together reach `1.0`. A standard read-one-file → patch-one-file → pytest loop will either stall at 0.71 or exhaust MAX_STEPS without reaching submit. The agent needs to hold the regression in working memory and reason that two files must be patched in the same step.
+After that patch, `test_rank_best_match_first` has **regressed**: a test that was passing before is now failing. The agent is stuck at 0.71. Patching `ranker.py` alone (without scorer) yields only 0.57 (4/7). Only fixing both scorer and ranker together reaches 0.86 (6/7), and fixing all three files reaches 1.0. An agent that submits after the scorer-only patch scores ≈ 0.70 — partial credit, not a sweep.
+
+The coupling forces the agent to hold the regression in working memory and reason that `scorer.py` and `ranker.py` must both be fixed before the suite goes green. A standard one-file-at-a-time patching loop either submits early at 0.70 or exhausts MAX_STEPS without converging.
 
 ---
 

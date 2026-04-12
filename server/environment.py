@@ -675,7 +675,11 @@ class CodeReviewEnvironment:
                             if delta > 0:
                                 reward = round(0.01 + delta * 0.88, 4)
                                 self.prev_pass_rate = raw
+                            elif delta < 0:
+                                # Regression: negative reward, floored at -0.1
+                                reward = round(max(-0.1, 0.01 + delta * 0.88), 4)
                             else:
+                                # No change: small positive to reward the attempt
                                 reward = 0.005
 
                             info["test_pass_rate"] = round(raw, 4)
@@ -720,13 +724,13 @@ class CodeReviewEnvironment:
                             self.state.progress_depth += 1
                             reward = 0.05  # larger signal for real progress
                             outcome_label = "progress"
-                        elif new_health == prev_health and self._restart_count > 0:
-                            # Same state after another restart = trap (wasted step)
+                        elif new_health == prev_health:
+                            # Same state after restart = wasted step (trap on first AND repeated calls)
                             self.state.trap_count += 1
                             reward = 0.005
                             outcome_label = "no_effect"
-                        elif new_health in ("crashed", "oom_killed") and self._restart_count > 0:
-                            # Explicitly worsened or still broken
+                        elif new_health in ("crashed", "oom_killed"):
+                            # Still broken or worsened — penalize regardless of restart count
                             self.state.trap_count += 1
                             reward = 0.005
                             outcome_label = "worsened"

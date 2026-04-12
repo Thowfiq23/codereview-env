@@ -148,7 +148,7 @@ Every engineering team has this loop: CI fails → engineer triages → finds ro
 | 9 | `INC-009` | Memory Leak / OOM | ⚫ Expert | 3 | Unbounded cache · missing eviction · module accumulator |
 | 10 | `INC-010` | Network Timeout Cascade | ⚫ Expert | 3 | Two-sided timeout trap · retry count · circuit breaker |
 
-> **Difficulty note:** Tasks 1–4 reward basic code comprehension. Tasks 5–6 require algorithmic reasoning and coupling awareness. Tasks 7–10 require multi-step causal reasoning: diagnose → patch → restart → verify.
+> **Difficulty note:** Tasks 1–4 reward basic code comprehension. Tasks 5–6 require algorithmic reasoning and coupling awareness. Tasks 7–9 require multi-step causal reasoning: diagnose → patch → restart → verify. Task 10 is a pure code fix with no restart gate — its difficulty comes from a two-sided constraint trap and coupled network components.
 
 ---
 
@@ -289,7 +289,12 @@ Every engineering team has this loop: CI fails → engineer triages → finds ro
 2. `add()` never evicts oldest entry when `len >= CACHE_MAXSIZE` — unbounded growth
 3. `_processed_log` is a module-level list that accumulates every processed item forever
 
-**State:** Service starts in `oom_killed` state. Agent must fix all three leaks, then `restart_service` to recover.
+**State:** Service starts in `oom_killed`. `app_init.py` checks each component **independently** and writes a distinct status to `service_state.json`:
+- Fix only cache bugs (1+2), not processor → `degraded` + `component: "processor"` in logs
+- Fix only processor bug (3), not cache → `degraded` + `component: "cache"` in logs
+- Fix all three → `running`
+
+After a partial fix, the agent must call `inspect_logs` to read which component is still broken — the observation changes in a way that constrains the recovery path, not just applies a penalty.
 
 **Seeded variable:** `CACHE_MAXSIZE` (varies per episode)
 **Optimal steps:** 7 · **Tests:** 5
@@ -440,7 +445,7 @@ Each call to `POST /step` returns a `CodeObservation` with these fields:
 | `task_id` | `str` | Active task identifier |
 | `step_count` | `int` | Steps taken so far |
 | `current_task_index` | `int` | Round-robin position (cycles 0→9→0) |
-| `total_reward` | `float` | Cumulative reward this episode |
+| `total_reward` | `float` | Highest reward achieved so far this episode |
 | `done` | `bool` | Whether the episode has ended |
 | `system_health` | `str` | `unknown` / `oom_killed` / `crashed` / `degraded` / `running` / `healthy` |
 | `progress_depth` | `int` | Number of times system health improved (causal progress counter) |

@@ -720,17 +720,24 @@ class CodeReviewEnvironment:
                         info["prev_health"]     = prev_health
 
                         if new_health in ("running", "healthy") and prev_health not in ("running", "healthy"):
-                            # Genuine progress: system improved
+                            # Full recovery: system is healthy
                             self.state.progress_depth += 1
-                            reward = 0.05  # larger signal for real progress
+                            reward = 0.05
                             outcome_label = "progress"
+                        elif new_health == "degraded" and prev_health in ("oom_killed", "crashed", "unknown"):
+                            # Partial fix: one component recovered, another still broken.
+                            # The observation now carries distinct component-level diagnosis
+                            # (service_state['component']) — agent must read logs to continue.
+                            self.state.progress_depth += 1
+                            reward = 0.03
+                            outcome_label = "partial_progress"
                         elif new_health == prev_health:
-                            # Same state after restart = wasted step (trap on first AND repeated calls)
+                            # No change — restart was premature or incomplete fix
                             self.state.trap_count += 1
                             reward = 0.005
                             outcome_label = "no_effect"
                         elif new_health in ("crashed", "oom_killed"):
-                            # Still broken or worsened — penalize regardless of restart count
+                            # Still fully broken or worsened
                             self.state.trap_count += 1
                             reward = 0.005
                             outcome_label = "worsened"

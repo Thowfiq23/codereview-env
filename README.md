@@ -52,7 +52,7 @@ CodeReview-Env puts an agent inside the same loop that every software engineer l
 read failing tests  →  inspect logs  →  identify root cause  →  patch source  →  verify fix  →  submit
 ```
 
-This is not a toy. Every action the agent takes — running `pytest`, reading files, writing patches, restarting services — executes as real shell commands inside a physical Linux sandbox. The grader is `pytest` itself: the agent either fixes the bug or it does not.
+This is not a toy. Every action the agent takes — running `pytest`, reading files, writing patches, restarting services — executes as real shell commands inside a physical Linux sandbox. Test quality is graded by `pytest` directly, but the terminal reward is a 6-component weighted score: test quality, root-cause diagnosis, step efficiency, exploration breadth, trap avoidance, and submission credit — the agent either fixes the bug, explains why, and does so efficiently, or it does not.
 
 ---
 
@@ -100,9 +100,9 @@ This is not a toy. Every action the agent takes — running `pytest`, reading fi
 
 **Key design decisions:**
 
-- **Real subprocess execution** — no AST interpreters, no sandboxed Python eval. `pytest` runs as a child process; file I/O is real filesystem I/O.
+- **Real subprocess execution** — no AST interpreters, no sandboxed Python eval. `pytest` runs as a child process; file I/O is real filesystem I/O. Subprocesses receive a minimal clean environment (`PATH`, `HOME`, `LANG`, `LC_ALL`, `TMPDIR`, `USER`, `LOGNAME`) — no parent secrets, no ambient Python paths.
 - **Parametric seeding** — every task factory derives variable values (timeouts, thresholds, cache sizes) from a SHA-256-seeded RNG, so each episode reset produces a structurally identical but numerically distinct problem.
-- **Causal state graph** — for service/incident tasks, the environment tracks `system_health` (crashed → degraded → running → healthy) and penalizes trap actions that worsen state or waste a restart call.
+- **Causal state graph** — for service/incident tasks, the environment tracks `system_health` (`unknown` → `crashed` / `oom_killed` → `degraded` → `running` → `healthy`) and penalizes trap actions that worsen state or waste a restart call.
 - **Dense + terminal rewards** — `patch_file` emits `0.01 + Δpass_rate × 0.88` immediately; `submit_fix` triggers 6-component terminal scoring.
 - **MCP JSON-RPC 2.0** — `/mcp` endpoint exposes all 9 tools via `tools/list` and `tools/call` for MCP-native clients.
 

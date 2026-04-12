@@ -245,6 +245,19 @@ class CodeReviewEnvironment:
                     return "unknown"
             return "crashed"
 
+    def _get_topology_service_status(self, service_name: str) -> str:
+        """Return the status of a single named service from service_state.json."""
+        state_path = os.path.join(self.workspace_dir, "service_state.json")
+        if not os.path.isfile(state_path):
+            return "unknown"
+        try:
+            with open(state_path, encoding="utf-8") as f:
+                topo = json.load(f)
+            svc = topo.get("services", {}).get(service_name, {})
+            return svc.get("status", "unknown")
+        except Exception:
+            return "unknown"
+
         # For pure code tasks (1-6): use pass rate as proxy
         rate = self._get_test_pass_rate()
         if rate >= 1.0:
@@ -778,6 +791,13 @@ class CodeReviewEnvironment:
                     else:
                         run_cmd = "python app_init.py"
 
+                    # For task_10 targeted restarts, snapshot the specific
+                    # service status before running so we can detect per-service
+                    # progress even when global health stays "degraded".
+                    prev_svc_status = None
+                    if self.state.task_id == "task_10_pr" and svc_arg:
+                        prev_svc_status = self._get_topology_service_status(svc_arg)
+
                     try:
                         result = subprocess.run(
                             run_cmd,
@@ -798,15 +818,52 @@ class CodeReviewEnvironment:
                         info["restart_outcome"] = new_health
                         info["prev_health"]     = prev_health
 
-                        if new_health in ("running", "healthy") and prev_health not in ("running", "healthy"):
+                        # ── task_10 per-service scoring ───────────────────────
+                        # When a specific service is targeted, compare its status
+                        # directly. Global health stays "degraded" until ALL
+                        # services recover — using it alone would misclassify a
+                        # correct intermediate restart as no_effect.
+                        if prev_svc_status is not None:
+                            new_svc_status = self._get_topology_service_status(svc_arg)
+                            _good = ("running", "healthy")
+                            if new_svc_status in _good and prev_svc_status not in _good:
+                                # This service recovered — genuine progress
+                                self.state.progress_depth += 1
+                                reward = 0.04
+                                outcome_label = "partial_progress"
+                            elif new_svc_status == "degraded" and prev_svc_status in ("crashed", "unknown"):
+                                # Moved from crashed → degraded — still progress
+                                self.state.progress_depth += 1
+                                reward = 0.02
+                                outcome_label = "partial_progress"
+                            elif new_svc_status in _good and prev_svc_status in _good:
+                                # Service was already healthy — wasted restart
+                                self.state.trap_count += 1
+                                reward = 0.005
+                                outcome_label = "no_effect"
+                            elif new_svc_status == prev_svc_status:
+                                # No change for this service — fix is incomplete
+                                self.state.trap_count += 1
+                                reward = 0.005
+                                outcome_label = "no_effect"
+                            else:
+                                reward = 0.01
+                                outcome_label = "progress"
+                            # If all services are now healthy, give full progress reward
+                            if new_health in ("running", "healthy"):
+                                self.state.progress_depth += 1
+                                reward = 0.05
+                                outcome_label = "progress"
+                            info["svc_health"] = f"{prev_svc_status}→{new_svc_status}"
+
+                        # ── global health scoring (tasks 7-9) ─────────────────
+                        elif new_health in ("running", "healthy") and prev_health not in ("running", "healthy"):
                             # Full recovery: system is healthy
                             self.state.progress_depth += 1
                             reward = 0.05
                             outcome_label = "progress"
                         elif new_health == "degraded" and prev_health in ("oom_killed", "crashed", "unknown"):
                             # Partial fix: one component recovered, another still broken.
-                            # The observation now carries distinct component-level diagnosis
-                            # (service_state['component']) — agent must read logs to continue.
                             self.state.progress_depth += 1
                             reward = 0.03
                             outcome_label = "partial_progress"

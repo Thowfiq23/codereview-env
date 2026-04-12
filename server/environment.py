@@ -414,6 +414,162 @@ class CodeReviewEnvironment:
                             )
 
             # ----------------------------------------------------------------
+            # TOOL 2b: READ FILE — Clean file reader (no shell required)
+            # ----------------------------------------------------------------
+            elif action_obj.action_type == "read_file":
+                path = action_obj.path
+                if not path:
+                    obs_result = "Error: path is required for read_file."
+                    reward = 0.0
+                else:
+                    workspace_real = os.path.realpath(self.workspace_dir)
+                    full_path = os.path.realpath(
+                        os.path.join(self.workspace_dir, path)
+                    )
+                    if not full_path.startswith(workspace_real + os.sep):
+                        obs_result = "Security Error: Path traversal detected and blocked."
+                        reward = -0.05
+                    elif not os.path.isfile(full_path):
+                        obs_result = f"Error: File not found: {path}"
+                        reward = 0.005
+                    else:
+                        try:
+                            with open(full_path, "r", encoding="utf-8") as f:
+                                content = f.read()
+                            MAX_CHARS = 4000
+                            if len(content) > MAX_CHARS:
+                                content = (
+                                    content[:MAX_CHARS]
+                                    + f"\n...[TRUNCATED — {len(content)} total chars, showing first {MAX_CHARS}]..."
+                                )
+                            obs_result = f"--- {path} ---\n{content}"
+                            reward = 0.01
+                        except Exception as e:
+                            obs_result = f"Error reading {path}: {e}"
+                            reward = 0.005
+
+            # ----------------------------------------------------------------
+            # TOOL 2c: SEARCH CODEBASE — Grep with regex across .py files
+            # ----------------------------------------------------------------
+            elif action_obj.action_type == "search_codebase":
+                pattern = action_obj.pattern
+                if not pattern:
+                    obs_result = "Error: pattern is required for search_codebase."
+                    reward = 0.0
+                else:
+                    try:
+                        result = subprocess.run(
+                            ["grep", "-rn", "--include=*.py", pattern, "."],
+                            cwd=self.workspace_dir,
+                            capture_output=True, text=True, timeout=10, env=env,
+                        )
+                        output = (result.stdout or result.stderr or "").strip()
+                        MAX_CHARS = 3000
+                        if len(output) > MAX_CHARS:
+                            output = output[:MAX_CHARS] + f"\n...[TRUNCATED]..."
+                        obs_result = (
+                            f"--- search: {pattern!r} ---\n{output}"
+                            if output else f"No matches for pattern: {pattern!r}"
+                        )
+                        reward = 0.01
+                    except TimeoutExpired:
+                        obs_result = "Error: search timed out."
+                        reward = 0.005
+
+            # ----------------------------------------------------------------
+            # TOOL 2d: RUN TESTS — Targeted pytest (optional path)
+            # ----------------------------------------------------------------
+            elif action_obj.action_type == "run_tests":
+                test_path = action_obj.path or "tests/"
+                try:
+                    result = subprocess.run(
+                        f"pytest {test_path} -v --tb=short",
+                        cwd=self.workspace_dir, shell=True,
+                        capture_output=True, text=True, timeout=20, env=env,
+                        start_new_session=True,
+                    )
+                    output = result.stdout + result.stderr
+                    MAX_OUTPUT_CHARS = 4000
+                    if len(output) > MAX_OUTPUT_CHARS:
+                        output = (
+                            f"...[TRUNCATED — {len(output)} chars, "
+                            f"showing last {MAX_OUTPUT_CHARS}]...\n"
+                            + output[-MAX_OUTPUT_CHARS:]
+                        )
+                    obs_result = f"--- pytest {test_path} (Exit {result.returncode}) ---\n{output}"
+                    reward = 0.01 if result.returncode == 0 else 0.005
+                except TimeoutExpired:
+                    obs_result = "Error: pytest timed out after 20 seconds."
+                    reward = 0.005
+
+                self._enforce_test_integrity()
+
+            # ----------------------------------------------------------------
+            # TOOL 2e: INSPECT LOGS — Read service/migration log files
+            # ----------------------------------------------------------------
+            elif action_obj.action_type == "inspect_logs":
+                log_names = ["service.log", "migration.log", "app.log"]
+                found = []
+                for fname in log_names:
+                    fpath = os.path.join(self.workspace_dir, fname)
+                    if os.path.isfile(fpath):
+                        found.append((fname, fpath))
+
+                if not found:
+                    obs_result = (
+                        "No log files found yet. Log files are generated after service operations. "
+                        "Call restart_service to run app_init.py and produce logs."
+                    )
+                    reward = 0.005
+                else:
+                    parts = []
+                    for fname, fpath in found:
+                        try:
+                            with open(fpath, "r", encoding="utf-8") as f:
+                                content = f.read()
+                            if len(content) > 2000:
+                                content = "...[showing last 2000 chars]...\n" + content[-2000:]
+                            parts.append(f"--- {fname} ---\n{content}")
+                        except Exception as e:
+                            parts.append(f"--- {fname} ---\nError reading: {e}")
+                    obs_result = "\n\n".join(parts)
+                    reward = 0.01
+
+            # ----------------------------------------------------------------
+            # TOOL 2f: RESTART SERVICE — Run app_init.py, update state JSON
+            # ----------------------------------------------------------------
+            elif action_obj.action_type == "restart_service":
+                app_init_path = os.path.join(self.workspace_dir, "app_init.py")
+                if not os.path.isfile(app_init_path):
+                    obs_result = (
+                        "Error: app_init.py not found in workspace root. "
+                        "This action only applies to tasks with a service or database component."
+                    )
+                    reward = 0.005
+                else:
+                    try:
+                        result = subprocess.run(
+                            "python app_init.py",
+                            cwd=self.workspace_dir, shell=True,
+                            capture_output=True, text=True, timeout=15, env=env,
+                            start_new_session=True,
+                        )
+                        output = (result.stdout + result.stderr).strip()
+                        MAX_CHARS = 2000
+                        if len(output) > MAX_CHARS:
+                            output = output[-MAX_CHARS:]
+                        obs_result = (
+                            f"Service restart {'succeeded' if result.returncode == 0 else 'failed'} "
+                            f"(exit {result.returncode}):\n{output}"
+                        )
+                        reward = 0.01 if result.returncode == 0 else 0.005
+                    except TimeoutExpired:
+                        obs_result = "Error: app_init.py timed out after 15 seconds."
+                        reward = 0.005
+
+                self._enforce_test_integrity()
+
+            # ----------------------------------------------------------------
             # TOOL 3: SUBMIT REVIEW — Final execution grader
             # ----------------------------------------------------------------
             elif action_obj.action_type == "submit_review":
@@ -442,6 +598,39 @@ class CodeReviewEnvironment:
                 done = True
                 self.state.total_reward = max(self.state.total_reward, reward)
                 info["feedback"] = feedback
+                shutil.rmtree(self.workspace_dir, ignore_errors=True)
+
+            # ----------------------------------------------------------------
+            # TOOL 4: SUBMIT FIX — Preferred terminal with root-cause analysis
+            # (identical grading logic to submit_review; records root_cause)
+            # ----------------------------------------------------------------
+            elif action_obj.action_type == "submit_fix":
+                root_cause = action_obj.root_cause or action_obj.summary or "(no root cause provided)"
+                try:
+                    result = subprocess.run(
+                        "pytest tests/ -v",
+                        cwd=self.workspace_dir, shell=True,
+                        capture_output=True, text=True, timeout=15, env=env
+                    )
+                    if result.returncode == 0:
+                        reward = 0.99
+                        feedback = f"SUCCESS: All tests passed."
+                        info["test_pass_rate"] = 1.0
+                    else:
+                        raw = self._get_test_pass_rate()
+                        reward = round(0.01 + raw * 0.97, 4)
+                        feedback = f"FAILED: Tests still failing.\n{result.stdout[-500:]}"
+                        info["test_pass_rate"] = round(raw, 4)
+                except TimeoutExpired:
+                    reward = 0.01
+                    feedback = "FAILED: Test suite timed out."
+                    info["test_pass_rate"] = 0.0
+
+                obs_result = f"Evaluation complete. {feedback}"
+                done = True
+                self.state.total_reward = max(self.state.total_reward, reward)
+                info["feedback"] = feedback
+                info["root_cause"] = root_cause
                 shutil.rmtree(self.workspace_dir, ignore_errors=True)
 
             # Server-side max_steps cutoff

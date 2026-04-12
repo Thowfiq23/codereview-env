@@ -15,6 +15,13 @@ Difficulty progression:
                              (EMA formula, sample vs population std, window boundary)
                              All test values computed from the random seed —
                              the LLM must understand the maths to fix the code.
+  task_6_pr  Expert        — 3 coupled bugs, search ranking pipeline
+                             (tokenizer, relevance scorer, ranker — coupled trap)
+  task_7_pr  Expert        — 3 config type bugs, service startup gate
+                             (string configs cause TypeErrors; restart_service required)
+  task_8_pr  Expert        — 3 migration bugs, database init gate
+                             (wrong sort order, silent exception, multi-stmt execute;
+                              inspect_logs + restart_service required)
 """
 import re
 import subprocess
@@ -1085,6 +1092,457 @@ def test_rank_preserves_count():
     }
 
 
+def _make_task_7_repo(seed: int) -> dict:
+    """
+    Service Config Type Errors — 3 bugs in config/settings.py.
+
+      1. TIMEOUT is a string (e.g. "45") instead of int 45
+         → causes TypeError: can only concatenate str (not "float") to str
+      2. MAX_WORKERS is a string (e.g. "6") instead of int 6
+         → causes TypeError in range(MAX_WORKERS) and arithmetic
+      3. RETRY_DELAY is a negative number (e.g. -1)
+         → semantically invalid: retry storms on failure
+
+    After fixing the config, the agent must call restart_service.
+    app_init.py validates config types/values and writes service_state.json.
+    test_service_state_running() ONLY passes after restart_service is called
+    with a valid config — it reads service_state.json for status="running".
+
+    Randomised per episode:
+      • TIMEOUT value (one of 30, 45, 60, 90, 120)
+      • MAX_WORKERS value (one of 2, 4, 6, 8)
+      • RETRY_DELAY buggy value (one of -1, -2, -3)
+    """
+    rng = random.Random(seed)
+
+    timeout_val  = rng.choice([30, 45, 60, 90, 120])
+    workers_val  = rng.choice([2, 4, 6, 8])
+    retry_buggy  = rng.choice([-1, -2, -3])
+
+    # ── Buggy config (all three values have type/value errors) ───────────────
+    settings_src = (
+        '"""Service configuration. All values must be correctly typed."""\n'
+        "\n"
+        "# BUG 1: TIMEOUT is a string — causes TypeError in time arithmetic.\n"
+        "# Fix: remove the quotes so it is an int literal.\n"
+        f'TIMEOUT = "{timeout_val}"\n'
+        "\n"
+        "# BUG 2: MAX_WORKERS is a string — causes TypeError in range() and pool arithmetic.\n"
+        "# Fix: remove the quotes so it is an int literal.\n"
+        f'MAX_WORKERS = "{workers_val}"\n'
+        "\n"
+        "# BUG 3: RETRY_DELAY is negative — causes immediate retry storms on failure.\n"
+        "# Fix: set to a non-negative value (e.g. 0.5).\n"
+        f"RETRY_DELAY = {retry_buggy}\n"
+    )
+
+    # ── app/handler.py — correct code that uses settings (not buggy itself) ──
+    handler_src = (
+        '"""Request handler — uses config for timeouts and worker limits."""\n'
+        "import time\n"
+        "from config import settings\n"
+        "\n"
+        "def handle_request(payload: dict) -> dict:\n"
+        '    """Process a request within the configured timeout window."""\n'
+        "    deadline = time.time() + settings.TIMEOUT          # TypeError if TIMEOUT is str\n"
+        "    slots    = list(range(settings.MAX_WORKERS))       # TypeError if MAX_WORKERS is str\n"
+        "    backoff  = settings.RETRY_DELAY                    # must be >= 0\n"
+        "    return {\n"
+        '        "status": "ok",\n'
+        '        "deadline": deadline,\n'
+        '        "slots": slots,\n'
+        '        "backoff": backoff,\n'
+        "    }\n"
+    )
+
+    # ── app_init.py — validates config and writes service_state.json ─────────
+    app_init_src = (
+        '#!/usr/bin/env python3\n'
+        '"""Service initializer. Run after fixing config to apply changes.\n'
+        "Called by the restart_service action. Validates config types and values,\n"
+        'then writes service_state.json with status="running" or "crashed".\n'
+        '"""\n'
+        "import json, os, sys, time\n"
+        "\n"
+        "STATE_PATH = \"service_state.json\"\n"
+        "\n"
+        "def main():\n"
+        "    try:\n"
+        "        from config import settings\n"
+        "        if not isinstance(settings.TIMEOUT, int):\n"
+        "            raise TypeError(\n"
+        "                f\"TIMEOUT must be int, got {type(settings.TIMEOUT).__name__}: \"\n"
+        "                f\"{settings.TIMEOUT!r}\"\n"
+        "            )\n"
+        "        if not isinstance(settings.MAX_WORKERS, int):\n"
+        "            raise TypeError(\n"
+        "                f\"MAX_WORKERS must be int, got {type(settings.MAX_WORKERS).__name__}: \"\n"
+        "                f\"{settings.MAX_WORKERS!r}\"\n"
+        "            )\n"
+        "        if not isinstance(settings.RETRY_DELAY, (int, float)):\n"
+        "            raise TypeError(\n"
+        "                f\"RETRY_DELAY must be numeric, got \"\n"
+        "                f\"{type(settings.RETRY_DELAY).__name__}: {settings.RETRY_DELAY!r}\"\n"
+        "            )\n"
+        "        if settings.TIMEOUT <= 0:\n"
+        "            raise ValueError(f\"TIMEOUT must be positive, got {settings.TIMEOUT}\")\n"
+        "        if settings.MAX_WORKERS < 1:\n"
+        "            raise ValueError(f\"MAX_WORKERS must be >= 1, got {settings.MAX_WORKERS}\")\n"
+        "        if settings.RETRY_DELAY < 0:\n"
+        "            raise ValueError(\n"
+        "                f\"RETRY_DELAY must be non-negative, got {settings.RETRY_DELAY}\"\n"
+        "            )\n"
+        "        state = {\"status\": \"running\", \"pid\": os.getpid(),\n"
+        "                 \"started_at\": time.time()}\n"
+        "        with open(STATE_PATH, \"w\") as f:\n"
+        "            json.dump(state, f)\n"
+        "        print(\n"
+        "            f\"Service started: TIMEOUT={settings.TIMEOUT}s, \"\n"
+        "            f\"MAX_WORKERS={settings.MAX_WORKERS}, \"\n"
+        "            f\"RETRY_DELAY={settings.RETRY_DELAY}s\"\n"
+        "        )\n"
+        "        return 0\n"
+        "    except Exception as e:\n"
+        "        state = {\"status\": \"crashed\", \"last_error\": str(e)}\n"
+        "        with open(STATE_PATH, \"w\") as f:\n"
+        "            json.dump(state, f)\n"
+        "        print(f\"Service failed to start: {e}\", file=sys.stderr)\n"
+        "        return 1\n"
+        "\n"
+        "if __name__ == \"__main__\":\n"
+        "    sys.exit(main())\n"
+    )
+
+    # ── Initial service_state.json (crashed — reflects buggy config) ─────────
+    service_state_src = (
+        '{"status": "crashed", '
+        '"last_error": "TypeError: config values are strings, not ints"}\n'
+    )
+
+    # ── Parametric test file ─────────────────────────────────────────────────
+    test_src = """\
+import json
+import os
+import pytest
+from config import settings
+from app.handler import handle_request
+
+
+def test_timeout_is_int():
+    \"\"\"TIMEOUT must be int so time arithmetic doesn't raise TypeError.\"\"\"
+    assert isinstance(settings.TIMEOUT, int), (
+        "Config Error: TIMEOUT must be int, got "
+        + type(settings.TIMEOUT).__name__
+        + ": " + repr(settings.TIMEOUT)
+        + ". Remove the quotes in config/settings.py."
+    )
+    assert settings.TIMEOUT > 0, (
+        "Config Error: TIMEOUT must be positive, got " + str(settings.TIMEOUT)
+    )
+
+
+def test_max_workers_is_int():
+    \"\"\"MAX_WORKERS must be int so range() and pool arithmetic don't raise TypeError.\"\"\"
+    assert isinstance(settings.MAX_WORKERS, int), (
+        "Config Error: MAX_WORKERS must be int, got "
+        + type(settings.MAX_WORKERS).__name__
+        + ": " + repr(settings.MAX_WORKERS)
+        + ". Remove the quotes in config/settings.py."
+    )
+    assert 1 <= settings.MAX_WORKERS <= 16, (
+        "Config Error: MAX_WORKERS=" + str(settings.MAX_WORKERS)
+        + " is outside valid range [1, 16]."
+    )
+
+
+def test_retry_delay_is_nonnegative():
+    \"\"\"RETRY_DELAY must be >= 0 to avoid immediate retry storms.\"\"\"
+    assert isinstance(settings.RETRY_DELAY, (int, float)), (
+        "Config Error: RETRY_DELAY must be numeric, got "
+        + type(settings.RETRY_DELAY).__name__
+        + ": " + repr(settings.RETRY_DELAY) + "."
+    )
+    assert settings.RETRY_DELAY >= 0, (
+        "Config Error: RETRY_DELAY=" + str(settings.RETRY_DELAY)
+        + " is negative. A negative retry delay causes retry storms. Set to >= 0."
+    )
+
+
+def test_handler_processes_request():
+    \"\"\"handle_request must not raise TypeError when config is correctly typed.\"\"\"
+    try:
+        result = handle_request({"user": "alice", "op": "read"})
+        assert result["status"] == "ok", "Handler returned unexpected status."
+        assert isinstance(result["slots"], list), "Handler slots must be a list."
+        assert result["backoff"] >= 0, "Handler backoff must be non-negative."
+    except TypeError as e:
+        pytest.fail(
+            "Handler raised TypeError — likely a string config value used in "
+            "arithmetic or range(). Fix config/settings.py. Error: " + str(e)
+        )
+
+
+def test_service_state_running():
+    \"\"\"service_state.json must show status='running' after restart_service.
+
+    Workflow:
+      1. Fix all 3 bugs in config/settings.py (types + RETRY_DELAY >= 0).
+      2. Call restart_service — this runs app_init.py which validates config
+         and writes service_state.json with status='running'.
+      3. This test then passes.
+    \"\"\"
+    assert os.path.isfile("service_state.json"), (
+        "service_state.json not found. "
+        "After fixing config bugs, call restart_service to run app_init.py "
+        "which validates config and creates this file."
+    )
+    with open("service_state.json") as f:
+        state = json.load(f)
+    status = state.get("status")
+    assert status == "running", (
+        "Service did not start. Expected status='running', got "
+        + repr(status) + ". "
+        + "Last error: " + repr(state.get("last_error", "none"))
+        + ". Fix all config bugs, then call restart_service again."
+    )
+"""
+
+    return {
+        "config/__init__.py": "",
+        "config/settings.py": settings_src,
+        "app/__init__.py": "",
+        "app/handler.py": handler_src,
+        "app_init.py": app_init_src,
+        "service_state.json": service_state_src,
+        "tests/__init__.py": "",
+        "tests/test_service.py": test_src,
+    }
+
+
+def _make_task_8_repo(seed: int) -> dict:
+    """
+    Database Migration Ordering — 3 bugs in db/migrator.py.
+
+      1. sorted(files) sorts lexicographically: "10_..." < "2_..." alphabetically
+         so the index migration runs before the posts table exists → FK/index fails.
+         Fix: sort by the leading integer: key=lambda f: int(f.split('_')[0])
+
+      2. Exception handler swallows failures silently with a bare `pass`.
+         The agent cannot tell which migration failed without inspect_logs.
+         Fix: re-raise the exception (or log + re-raise).
+
+      3. conn.execute(sql) only handles one statement per call.
+         10_add_indexes.sql contains two CREATE INDEX statements; only the first
+         runs, silently dropping the second.
+         Fix: use conn.executescript(sql) for multi-statement SQL files.
+
+    Workflow the agent must follow:
+      1. inspect_logs (migration.log shows errors from previous restart attempts)
+      2. Fix db/migrator.py (all 3 bugs)
+      3. Call restart_service (runs app_init.py → runs migrations → creates app.db)
+      4. Tests read app.db and verify tables + indexes exist
+
+    Randomised per episode:
+      • Primary user column name (username / email / handle / nickname)
+      • Clear text content column name (title / body / message / content)
+    """
+    rng = random.Random(seed)
+
+    user_col    = rng.choice(["username", "email", "handle", "nickname"])
+    content_col = rng.choice(["title", "body", "message", "content"])
+    idx2_name   = f"idx_users_{user_col}"
+
+    # ── Migration SQL files ───────────────────────────────────────────────────
+    sql_1 = (
+        f"CREATE TABLE IF NOT EXISTS users (\n"
+        f"    id      INTEGER PRIMARY KEY AUTOINCREMENT,\n"
+        f"    {user_col} TEXT NOT NULL UNIQUE\n"
+        f");\n"
+    )
+    sql_2 = (
+        f"CREATE TABLE IF NOT EXISTS posts (\n"
+        f"    id      INTEGER PRIMARY KEY AUTOINCREMENT,\n"
+        f"    user_id INTEGER NOT NULL,\n"
+        f"    {content_col} TEXT NOT NULL,\n"
+        f"    FOREIGN KEY (user_id) REFERENCES users(id)\n"
+        f");\n"
+    )
+    # Two statements — requires executescript()
+    sql_10 = (
+        "CREATE INDEX IF NOT EXISTS idx_posts_user_id ON posts(user_id);\n"
+        f"CREATE INDEX IF NOT EXISTS {idx2_name} ON users({user_col});\n"
+    )
+
+    # ── Buggy migrator ────────────────────────────────────────────────────────
+    migrator_src = (
+        '"""Database migration runner."""\n'
+        "import sqlite3\n"
+        "import os\n"
+        "import logging\n"
+        "\n"
+        "LOG_PATH = \"migration.log\"\n"
+        "\n"
+        "def run_migrations(db_path: str, migration_dir: str) -> None:\n"
+        '    """Apply all pending SQL migration files in numeric order."""\n'
+        "    logging.basicConfig(\n"
+        '        filename=LOG_PATH, level=logging.INFO,\n'
+        '        format="%(asctime)s %(levelname)s %(message)s"\n'
+        "    )\n"
+        "    conn = sqlite3.connect(db_path)\n"
+        "    try:\n"
+        "        # BUG 1: sorted() uses lexicographic order.\n"
+        '        # "10_add_indexes.sql" sorts BEFORE "2_create_posts.sql"\n'
+        "        # because '1' < '2' as a character.\n"
+        "        # Fix: sort by leading integer:\n"
+        "        #   key=lambda f: int(f.split('_')[0])\n"
+        "        all_files = sorted(os.listdir(migration_dir))\n"
+        "        sql_files = [f for f in all_files if f.endswith('.sql')]\n"
+        "        for fname in sql_files:\n"
+        "            fpath = os.path.join(migration_dir, fname)\n"
+        "            with open(fpath) as fh:\n"
+        "                sql = fh.read()\n"
+        "            try:\n"
+        "                # BUG 2: conn.execute() only runs ONE statement per call.\n"
+        "                # 10_add_indexes.sql has TWO CREATE INDEX statements;\n"
+        "                # the second is silently dropped.\n"
+        "                # Fix: use conn.executescript(sql)\n"
+        "                conn.execute(sql)\n"
+        "                conn.commit()\n"
+        "                logging.info(f\"Applied: {fname}\")\n"
+        "            except Exception:\n"
+        "                # BUG 3: exception swallowed — migration failure is invisible.\n"
+        "                # Fix: re-raise so the caller knows a migration failed.\n"
+        "                pass\n"
+        "    finally:\n"
+        "        conn.close()\n"
+    )
+
+    # ── app_init.py — runs migrations, writes migration.log ──────────────────
+    app_init_src = (
+        '#!/usr/bin/env python3\n'
+        '"""Database initializer. Run via restart_service to apply migrations.\n'
+        "Reads SQL files from migrations/, applies them to app.db in order,\n"
+        'and writes progress to migration.log.\n'
+        '"""\n'
+        "import os, sys, logging\n"
+        "\n"
+        "DB_PATH        = \"app.db\"\n"
+        "MIGRATION_DIR  = \"migrations\"\n"
+        "\n"
+        "def main():\n"
+        "    try:\n"
+        "        from db.migrator import run_migrations\n"
+        "        run_migrations(DB_PATH, MIGRATION_DIR)\n"
+        "        print(\"Migrations complete.\")\n"
+        "        return 0\n"
+        "    except Exception as e:\n"
+        "        print(f\"Migration failed: {e}\", file=sys.stderr)\n"
+        "        return 1\n"
+        "\n"
+        "if __name__ == \"__main__\":\n"
+        "    sys.exit(main())\n"
+    )
+
+    # ── Parametric test file ─────────────────────────────────────────────────
+    test_template = """\
+import os
+import sqlite3
+import pytest
+
+DB_PATH = "app.db"
+
+
+def _get_tables(conn):
+    cur = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+    )
+    return {{row[0] for row in cur.fetchall()}}
+
+
+def _get_indexes(conn):
+    cur = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'"
+    )
+    return {{row[0] for row in cur.fetchall()}}
+
+
+def test_db_exists():
+    \"\"\"app.db must exist. Call restart_service to run migrations if missing.\"\"\"
+    assert os.path.isfile(DB_PATH), (
+        "app.db not found. "
+        "Fix db/migrator.py, then call restart_service to run app_init.py. "
+        "app_init.py runs all SQL migrations and creates app.db. "
+        "Use inspect_logs to read migration.log if something goes wrong."
+    )
+
+
+def test_users_table_exists():
+    \"\"\"The users table must be created by 1_create_users.sql.\"\"\"
+    assert os.path.isfile(DB_PATH), pytest.skip("app.db missing — run test_db_exists first")
+    conn = sqlite3.connect(DB_PATH)
+    tables = _get_tables(conn)
+    conn.close()
+    assert "users" in tables, (
+        "DB Error: 'users' table not found. "
+        "Migration 1_create_users.sql may not have run. "
+        "Check that db/migrator.py sorts files by leading integer, not alphabetically."
+    )
+
+
+def test_posts_table_exists():
+    \"\"\"The posts table must be created by 2_create_posts.sql (depends on users).\"\"\"
+    assert os.path.isfile(DB_PATH), pytest.skip("app.db missing — run test_db_exists first")
+    conn = sqlite3.connect(DB_PATH)
+    tables = _get_tables(conn)
+    conn.close()
+    assert "posts" in tables, (
+        "DB Error: 'posts' table not found. "
+        "Migration 2_create_posts.sql may have failed because users table was not yet created. "
+        "Fix: sort migrations by leading integer so 2_create_posts runs AFTER 1_create_users. "
+        "Also ensure exceptions are not silently swallowed (Bug 3)."
+    )
+
+
+def test_posts_index_exists():
+    \"\"\"idx_posts_user_id must be created by 10_add_indexes.sql.\"\"\"
+    assert os.path.isfile(DB_PATH), pytest.skip("app.db missing — run test_db_exists first")
+    conn = sqlite3.connect(DB_PATH)
+    indexes = _get_indexes(conn)
+    conn.close()
+    assert "idx_posts_user_id" in indexes, (
+        "DB Error: index idx_posts_user_id not found. "
+        "10_add_indexes.sql contains two CREATE INDEX statements. "
+        "Fix: use conn.executescript(sql) instead of conn.execute(sql) for multi-statement files. "
+        "Use inspect_logs to check migration.log for details."
+    )
+
+
+def test_user_column_index_exists():
+    \"\"\"idx_users_{user_col} must also be created by 10_add_indexes.sql.\"\"\"
+    assert os.path.isfile(DB_PATH), pytest.skip("app.db missing — run test_db_exists first")
+    conn = sqlite3.connect(DB_PATH)
+    indexes = _get_indexes(conn)
+    conn.close()
+    assert "{idx2_name}" in indexes, (
+        "DB Error: index {idx2_name} not found. "
+        "This is the second CREATE INDEX in 10_add_indexes.sql. "
+        "Fix: use conn.executescript(sql) to execute both statements."
+    )
+"""
+    test_src = test_template.format(user_col=user_col, idx2_name=idx2_name)
+
+    return {
+        "db/__init__.py": "",
+        "db/migrator.py": migrator_src,
+        "migrations/1_create_users.sql": sql_1,
+        "migrations/2_create_posts.sql": sql_2,
+        "migrations/10_add_indexes.sql": sql_10,
+        "app_init.py": app_init_src,
+        "tests/__init__.py": "",
+        "tests/test_migrations.py": test_src,
+    }
+
+
 # =============================================================================
 # Task manifest
 # =============================================================================
@@ -1143,6 +1601,30 @@ TASKS: List[Dict[str, Any]] = [
             "Fix all three bugs so the full test suite passes."
         ),
         "_repo_factory": _make_task_6_repo,
+    },
+    {
+        "task_id": "task_7_pr",
+        "description": (
+            "INC-031: The request-handling service fails to start after the config "
+            "was last edited. All three config values in config/settings.py have bugs: "
+            "TIMEOUT and MAX_WORKERS are string literals instead of ints (causing "
+            "TypeError in arithmetic and range()), and RETRY_DELAY is negative. "
+            "Fix the config, then call restart_service to apply changes and bring "
+            "the service back online."
+        ),
+        "_repo_factory": _make_task_7_repo,
+    },
+    {
+        "task_id": "task_8_pr",
+        "description": (
+            "INC-047: Database migrations are failing silently after the migration "
+            "script was refactored. db/migrator.py has three bugs: migrations run in "
+            "lexicographic order (10 before 2), exceptions are swallowed silently, "
+            "and multi-statement SQL files only execute their first statement. "
+            "Use inspect_logs to see what migration.log recorded, fix all three "
+            "bugs, then call restart_service to apply the migrations and create app.db."
+        ),
+        "_repo_factory": _make_task_8_repo,
     },
 ]
 
@@ -1232,6 +1714,16 @@ def grade_task_6_pr(workspace_dir: str) -> float:
     return _run_pytest(workspace_dir)
 
 
+def grade_task_7_pr(workspace_dir: str) -> float:
+    """Grader: config type errors + service restart gate."""
+    return _run_pytest(workspace_dir)
+
+
+def grade_task_8_pr(workspace_dir: str) -> float:
+    """Grader: DB migration order, silent exceptions, multi-statement execute."""
+    return _run_pytest(workspace_dir)
+
+
 GRADERS: Dict[str, Callable[[str], float]] = {
     "task_1_pr": grade_task_1_pr,
     "task_2_pr": grade_task_2_pr,
@@ -1239,4 +1731,6 @@ GRADERS: Dict[str, Callable[[str], float]] = {
     "task_4_pr": grade_task_4_pr,
     "task_5_pr": grade_task_5_pr,
     "task_6_pr": grade_task_6_pr,
+    "task_7_pr": grade_task_7_pr,
+    "task_8_pr": grade_task_8_pr,
 }

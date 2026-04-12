@@ -4,28 +4,61 @@ from typing import List, Optional, Literal, Dict, Any
 
 class AgentAction(BaseModel):
     """Action submitted by the agent each turn."""
-    action_type: Literal["execute_command", "patch_file", "submit_review"]
+    action_type: Literal[
+        # Exploration tools
+        "execute_command",   # escape-hatch: run any bash command
+        "read_file",         # clean file reader — no shell needed
+        "search_codebase",   # grep with a regex pattern across all .py files
+        # Execution tools
+        "patch_file",        # overwrite a source file with fixed content
+        "run_tests",         # targeted pytest (optional path via `path` field)
+        "restart_service",   # run app_init.py and update service_state.json
+        # Diagnostic tools
+        "inspect_logs",      # read service.log / migration.log from workspace
+        # Terminal actions
+        "submit_fix",        # preferred terminal: grade + record root_cause
+        "submit_review",     # backward-compat alias for submit_fix
+    ]
 
-    # Tool 1: execute_command
+    # execute_command
     command: Optional[str] = Field(
         None,
-        description="Bash command to run in the sandbox (e.g. 'pytest tests/' or 'cat auth/models.py')"
+        description="Bash command to run in the sandbox (e.g. 'ls -la' or 'python -c ...')"
     )
 
-    # Tool 2: patch_file
+    # read_file / run_tests
+    path: Optional[str] = Field(
+        None,
+        description="Relative file path for read_file (e.g. 'app/handler.py') "
+                    "or test path for run_tests (e.g. 'tests/test_service.py'). "
+                    "Omit path for run_tests to run the full test suite."
+    )
+
+    # search_codebase
+    pattern: Optional[str] = Field(
+        None,
+        description="Regex pattern to search for across all .py files (e.g. 'TIMEOUT|MAX_WORKERS')"
+    )
+
+    # patch_file
     target_file: Optional[str] = Field(
         None,
-        description="Relative path of the file to overwrite (e.g. 'auth/models.py')"
+        description="Relative path of the file to overwrite (e.g. 'config/settings.py')"
     )
     new_content: Optional[str] = Field(
         None,
         description="Complete new content to write to target_file"
     )
 
-    # Tool 3: submit_review
+    # submit_fix / submit_review
     summary: Optional[str] = Field(
         None,
         description="Human-readable summary of the fix. Triggers final pytest grading."
+    )
+    root_cause: Optional[str] = Field(
+        None,
+        description="Root-cause analysis for submit_fix (e.g. 'TIMEOUT was str not int; "
+                    "migration sort was lexicographic not numeric'). Recorded in episode metadata."
     )
 
 

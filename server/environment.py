@@ -849,9 +849,9 @@ class CodeReviewEnvironment:
                             else:
                                 reward = 0.01
                                 outcome_label = "progress"
-                            # If all services are now healthy, give full progress reward
+                            # If all services are now healthy, upgrade to full progress
+                            # (no extra progress_depth increment — already counted above)
                             if new_health in ("running", "healthy"):
-                                self.state.progress_depth += 1
                                 reward = 0.05
                                 outcome_label = "progress"
                             info["svc_health"] = f"{prev_svc_status}→{new_svc_status}"

@@ -1,7 +1,7 @@
 """
 CodeReview-Env Inference Script
 ================================
-Runs an LLM agent against all 5 tasks in the CodeReview-Env sandbox.
+Runs an LLM agent against all 6 tasks in the CodeReview-Env sandbox.
 
 Required env vars:
   API_BASE_URL    - LLM API endpoint (default: HF Router)
@@ -248,7 +248,7 @@ def run_task(env: CodeReviewEnv, task_index: int) -> float:
 def main():
     env = CodeReviewEnv(base_url=ENV_URL)
     scores = []
-    n_tasks = 5
+    n_tasks = 6
     for i in range(n_tasks):
         scores.append(run_task(env, i))
 

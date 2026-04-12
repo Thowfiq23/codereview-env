@@ -289,6 +289,42 @@ The reward is **dense by design** — every `patch_file` produces a signal propo
 
 ---
 
+### Task 6 — `task_6_pr` — Search Ranking (Coupled Trap) — Expert
+
+**Scenario:** *PR #412 "Document search ranking"* — CI is red on three files in a search pipeline. One of the three bugs is a trap: fixing it in isolation causes a currently-passing test to regress.
+
+| File | Bug | Correct Fix |
+|------|-----|-------------|
+| `search/indexer.py` | `text.split()` — splits on whitespace only, punctuation sticks to tokens | `re.split(r'\W+', text.lower())` and filter empty strings |
+| `search/scorer.py` | `matches / len(doc_terms)` — penalises long documents unfairly; full match never reaches 1.0 | Divide by `len(query_terms)` |
+| `search/ranker.py` | `sorted(..., key=...)` — ascending order (lowest score first) | Add `reverse=True` |
+
+**The coupled trap — why greedy patching fails:**
+
+With both `scorer.py` and `ranker.py` bugs present, `test_rank_best_match_first` accidentally **passes**. The buggy scorer assigns a *lower* score to the verbose document (many terms, diluted fraction) than to the short imprecise document (fewer terms, higher fraction). Ascending sort then places the verbose doc first — the correct answer — by accident.
+
+```
+# With both bugs:
+verbose_doc: buggy_score = q / (q + extras)  ← small  → sorted first by ascending
+short_doc:   buggy_score = (q-1) / q          ← large  → sorted second
+
+# Fix scorer alone (scores now correct, ascending sort still present):
+verbose_doc: correct_score = 1.0  → sorted LAST by ascending  ← TEST FAILS
+short_doc:   correct_score < 1.0  → sorted first
+
+# Fix ranker alone (descending, buggy scores still present):
+short_doc:   buggy_score = (q-1)/q ← larger  → sorted first  ← TEST FAILS
+
+# Fix both together:
+verbose_doc: correct_score = 1.0  → sorted first by descending  ← TEST PASSES
+```
+
+An agent that patches `scorer.py`, reruns pytest, and sees a new failure has discovered the coupling and must now fix both files in one step. Greedy per-file patching with pytest between each patch will loop: fix scorer → ranking breaks → fix ranker → scorer needed too → fix scorer again → passes.
+
+**Parametric:** Word pool, query size (2–3 terms), and verbose document length (3–6 extra terms) are randomised each episode. The coupling invariant is verified by the factory — the trap always holds regardless of seed.
+
+---
+
 ## Difficulty Progression
 
 | Task | Domain | Bugs | Difficulty |
@@ -298,10 +334,11 @@ The reward is **dense by design** — every `patch_file` produces a signal propo
 | `task_3_pr` | Security + Async | 3 | Hard |
 | `task_4_pr` | Data Structures | 3 | Hard |
 | `task_5_pr` | Algorithms / Stats | 3 | Very Hard |
+| `task_6_pr` | Search / Coupling  | 3 | Expert |
 
 All tasks use **parametric factories** — each episode reset generates a fresh problem instance from a random seed so the agent cannot memorise expected values across episodes. The dense delta reward gives an RL agent a learning signal at every step, not just on success.
 
-A policy with shallow pattern matching will plateau at partial credit (one or two bugs fixed). All three bugs must be fixed correctly to reach full score.
+**task_6_pr is not saturated by greedy patching.** An agent that fixes bugs one file at a time and runs pytest between each patch will discover a regression on the second fix, requiring it to reason about cross-file interactions — a qualitatively different capability from single-file repair.
 
 ---
 
@@ -310,7 +347,7 @@ A policy with shallow pattern matching will plateau at partial credit (one or tw
 **Model:** `meta-llama/Llama-3.3-70B-Instruct` via HF Router (inference.py default)
 **Temperature:** `0.0` (fully deterministic — results are exactly reproducible)
 **Infrastructure:** 2 vCPU / 4 GB RAM (well within the 8 GB limit)
-**Runtime:** ~8 minutes for all 5 tasks
+**Runtime:** ~10 minutes for all 6 tasks
 
 ```
 [START] task=task_3_pr env=codereview-env model=meta-llama/Llama-3.3-70B-Instruct
@@ -344,13 +381,15 @@ A policy with shallow pattern matching will plateau at partial credit (one or tw
 [STEP] step=7 action={"action_type":"submit_review","summary":"Fixed quantity multiplication and discount percentage."} reward=0.99 done=true error=null
 [END] success=true steps=7 rewards=0.01,0.01,0.01,0.45,0.89,0.01,0.99
 
-[SUMMARY] tasks=5 scores=0.99,0.99,0.99,... average=0.99
+[SUMMARY] tasks=6 scores=0.99,0.99,0.99,... average=0.99
 ```
 
 > Note: The dense trajectory is the key output for RL training. Step 5 of task_3 shows the grader
 > correctly rejecting a syntactically valid but semantically wrong patch (`def` without `async`),
 > returning `reward=0.01` (floor). The agent self-corrects on step 6 and earns `0.89`. This demonstrates
 > that the grader enforces semantic correctness, not just syntactic validity.
+
+**task_6_pr is not represented in the trajectory above — it requires a qualitatively different strategy.** A greedy agent that patches `scorer.py` first will see `test_rank_best_match_first` regress (a previously-passing test starts failing). Standard read-patch-run-submit loops stall or exhaust MAX_STEPS without reaching full score. A strong agent must recognize the regression, diagnose the coupling, and patch both `scorer.py` and `ranker.py` before rerunning pytest. This task was deliberately designed so that the 0.99 baseline above does not extend to it.
 
 ---
 
@@ -513,6 +552,7 @@ tasks:
   - task_3_pr
   - task_4_pr
   - task_5_pr
+  - task_6_pr
 action_model: AgentAction
 observation_model: CodeObservation
 state_model: ReviewState
@@ -534,7 +574,7 @@ openenv validate .
 # 2. Runtime validation (server must be running)
 openenv validate --url http://localhost:7860
 
-# 3. Verify all 5 tasks produce scores in [0.0, 1.0]
+# 3. Verify all 6 tasks produce scores in [0.0, 1.0]
 python3 inference.py
 
 # 4. Docker build

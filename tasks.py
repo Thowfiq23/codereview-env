@@ -860,6 +860,231 @@ def test_sliding_window_full_span():
     }
 
 
+def _make_task_6_repo(seed: int) -> dict:
+    """
+    Document Search + Ranking — 3 bugs with a coupled scoring/ranking trap.
+
+    Files:
+      search/indexer.py  — Bug 1: splits on whitespace only (punctuation sticks to tokens)
+      search/scorer.py   — Bug 2: divides by len(doc_terms) instead of len(query_terms)
+      search/ranker.py   — Bug 3: sorts ascending instead of descending
+
+    THE TRAP — why this is hard:
+      test_rank_best_match_first PASSES with BOTH Bug 2 and Bug 3 present because
+      the verbose document (all query terms + many extras) gets a LOW buggy score
+      (few matches / many total terms) while the short imprecise document gets a
+      HIGH buggy score (partial matches / few total terms).  Ascending sort then
+      accidentally puts the verbose doc first — the correct answer.
+
+      Fix Bug 2 alone → scores are now correct (verbose=1.0 > short<1.0) but the
+      ascending sort (Bug 3) promotes the short doc → ranking test FAILS.
+
+      Fix Bug 3 alone → descending sort with still-wrong scores promotes the short
+      doc (higher buggy score) → ranking test FAILS.
+
+      Both must be fixed simultaneously.
+
+    Parametric per episode:
+      • Words drawn from a 16-word pool, shuffled by seed
+      • Query size: 2 or 3 terms
+      • Extra term count in verbose doc: 3–6
+    """
+    rng = random.Random(seed)
+
+    WORD_POOL = [
+        "alpha", "beta", "gamma", "delta", "epsilon", "zeta",
+        "eta",   "theta","iota",  "kappa", "lambda",  "mu",
+        "nu",    "xi",   "omicron","pi",
+    ]
+    pool = WORD_POOL[:]
+    rng.shuffle(pool)
+
+    # ── Parameters ────────────────────────────────────────────────────────────
+    q_size      = rng.choice([2, 3])
+    extra_count = rng.randint(3, 6)
+
+    query_terms    = pool[:q_size]
+    extra_terms    = pool[q_size : q_size + extra_count]
+    # verbose doc: all query terms + many extras  (correct winner; low buggy score)
+    verbose_terms  = query_terms + extra_terms         # len = q_size + extra_count
+    # short doc: only (q_size-1) query matches + 1 non-query term (wrong loser; high buggy score)
+    short_terms    = query_terms[:-1] + [pool[q_size + extra_count]]  # len = q_size
+
+    # Invariant check: buggy_verbose < buggy_short  (ascending accidentally correct)
+    buggy_verbose  = q_size / len(verbose_terms)
+    buggy_short    = (q_size - 1) / len(short_terms)
+    assert buggy_verbose < buggy_short, "Coupling invariant failed for this seed"
+
+    correct_short_num = q_size - 1
+    correct_short_str = f"{correct_short_num}/{q_size}"
+
+    # Tokenizer test words (independent of coupling)
+    tok_word1 = pool[q_size + extra_count + 1]
+    tok_word2 = pool[q_size + extra_count + 2]
+    tok_punc  = rng.choice([",", "!", "?"])
+    tok_input = f"{tok_word1}{tok_punc} {tok_word2}!"
+    tok_expected = [tok_word1, tok_word2]
+
+    # Scorer standalone test: doc with all query terms + 1 extra → must score 1.0
+    scorer_extra_word = pool[q_size + extra_count + 3]
+    scorer_doc_terms  = query_terms + [scorer_extra_word]
+
+    # ── Pre-computed repr strings (no Python expressions in format fields) ────
+    query_repr        = repr(query_terms)
+    verbose_repr      = repr(verbose_terms)
+    short_repr        = repr(short_terms)
+    tok_input_repr    = repr(tok_input)
+    tok_expected_repr = repr(tok_expected)
+    scorer_doc_repr   = repr(scorer_doc_terms)
+    q_size_minus_1    = q_size - 1
+    buggy_verbose_r4  = round(buggy_verbose, 4)
+    buggy_short_r4    = round(buggy_short, 4)
+
+    # ── Static source files ───────────────────────────────────────────────────
+    indexer_src = (
+        "import re\n"
+        "\n"
+        "def tokenize(text: str) -> list:\n"
+        "    \"\"\"\n"
+        "    Split text into lowercase tokens, stripping all punctuation.\n"
+        "    E.g. tokenize('Hello, world!') -> ['hello', 'world']\n"
+        "    \"\"\"\n"
+        "    # BUG 1: splits on whitespace only -- punctuation sticks to tokens.\n"
+        "    # Fix: use re.split(r'\\W+', text.lower()) and filter empty strings.\n"
+        "    return [w.lower() for w in text.split() if w]\n"
+    )
+
+    scorer_src = (
+        "def relevance_score(query_terms: list, doc_terms: list) -> float:\n"
+        "    \"\"\"\n"
+        "    Fraction of query terms found in the document.  Range [0.0, 1.0].\n"
+        "    1.0 means every query term appears at least once in the document.\n"
+        "    \"\"\"\n"
+        "    if not query_terms:\n"
+        "        return 0.0\n"
+        "    matches = len(set(query_terms) & set(doc_terms))\n"
+        "    # BUG 2: divides by len(doc_terms) -- score unfairly penalises long docs.\n"
+        "    # Fix: divide by len(query_terms) so a full match always returns 1.0.\n"
+        "    return matches / len(doc_terms)\n"
+    )
+
+    ranker_src = (
+        "from search.scorer import relevance_score\n"
+        "\n"
+        "def rank_documents(query_terms: list, documents: list) -> list:\n"
+        "    \"\"\"\n"
+        "    Return documents sorted by relevance to query_terms, highest first.\n"
+        "    Each document is a dict with at least a 'terms' key (list[str]).\n"
+        "    \"\"\"\n"
+        "    scored = [\n"
+        "        (doc, relevance_score(query_terms, doc['terms']))\n"
+        "        for doc in documents\n"
+        "    ]\n"
+        "    # BUG 3: sorted ascending (lowest score first) -- must be descending.\n"
+        "    # Fix: add reverse=True to sorted().\n"
+        "    return [doc for doc, _ in sorted(scored, key=lambda x: x[1])]\n"
+    )
+
+    # ── Parametric test file ──────────────────────────────────────────────────
+    test_template = """\
+from search.indexer import tokenize
+from search.scorer import relevance_score
+from search.ranker import rank_documents
+
+# ── Tokenizer ────────────────────────────────────────────────────────────────
+
+def test_tokenize_strips_punctuation():
+    result = tokenize({tok_input_repr})
+    assert result == {tok_expected_repr}, (
+        "Indexer Error: tokenize() must strip punctuation. "
+        "Use re.split(r'\\\\W+', ...) not str.split(). Got: " + repr(result)
+    )
+
+def test_tokenize_lowercases():
+    assert tokenize("Alpha BETA") == ["alpha", "beta"], (
+        "Indexer Error: tokenize() must lowercase all tokens."
+    )
+
+# ── Scorer ───────────────────────────────────────────────────────────────────
+
+def test_full_query_match_scores_one():
+    # doc has all {q_size} query terms plus 1 extra; every query term is present
+    score = relevance_score({query_repr}, {scorer_doc_repr})
+    assert abs(score - 1.0) < 1e-9, (
+        f"Scorer Error: all query terms present -> score must be 1.0, got {{score:.4f}}. "
+        "Fix: divide by len(query_terms), not len(doc_terms)."
+    )
+
+def test_empty_query_scores_zero():
+    assert relevance_score([], ["any", "word"]) == 0.0, (
+        "Scorer Error: empty query must score 0.0."
+    )
+
+def test_no_match_scores_zero():
+    assert relevance_score(["missing"], ["other", "words"]) == 0.0, (
+        "Scorer Error: no matching terms must score 0.0."
+    )
+
+# ── Ranker (coupled trap) ────────────────────────────────────────────────────
+# verbose_doc = {verbose_repr}
+#   all {q_size} query terms + {extra_count} extras -> correct score 1.0
+#   buggy score (divide by doc length): {buggy_verbose_r4}
+#
+# short_doc = {short_repr}
+#   only {q_size_minus_1} of {q_size} query terms -> correct score {correct_short_str}
+#   buggy score (divide by doc length): {buggy_short_r4}
+#
+# TRAP: buggy_verbose ({buggy_verbose_r4}) < buggy_short ({buggy_short_r4})
+#   => ascending sort accidentally puts verbose_doc first (correct answer).
+#   Fix scorer alone: verbose=1.0 > short, but ascending puts short first -> FAIL.
+#   Fix ranker alone: descending, but buggy scores put short first -> FAIL.
+#   Must fix BOTH scorer and ranker together.
+
+def test_rank_best_match_first():
+    query       = {query_repr}
+    verbose_doc = {{"id": "verbose", "terms": {verbose_repr}}}
+    short_doc   = {{"id": "short",   "terms": {short_repr}}}
+    results = rank_documents(query, [verbose_doc, short_doc])
+    assert results[0]["id"] == "verbose", (
+        f"Ranker Error: verbose_doc matches all {{len(query)}} query terms (score 1.0) "
+        f"and must rank first. Got order: {{[d['id'] for d in results]}}. "
+        "Hint: fix BOTH scorer (divide by len(query_terms)) "
+        "AND ranker (reverse=True) -- one fix without the other regresses this test."
+    )
+
+def test_rank_preserves_count():
+    query       = {query_repr}
+    verbose_doc = {{"id": "verbose", "terms": {verbose_repr}}}
+    short_doc   = {{"id": "short",   "terms": {short_repr}}}
+    results = rank_documents(query, [verbose_doc, short_doc])
+    assert len(results) == 2, (
+        f"Ranker Error: rank_documents must return all documents. Got {{len(results)}}."
+    )
+"""
+    test_src = test_template.format(
+        tok_input_repr=tok_input_repr,
+        tok_expected_repr=tok_expected_repr,
+        q_size=q_size,
+        q_size_minus_1=q_size_minus_1,
+        extra_count=extra_count,
+        query_repr=query_repr,
+        verbose_repr=verbose_repr,
+        short_repr=short_repr,
+        scorer_doc_repr=scorer_doc_repr,
+        buggy_verbose_r4=buggy_verbose_r4,
+        buggy_short_r4=buggy_short_r4,
+        correct_short_str=correct_short_str,
+    )
+
+    return {
+        "search/__init__.py": "",
+        "search/indexer.py":  indexer_src,
+        "search/scorer.py":   scorer_src,
+        "search/ranker.py":   ranker_src,
+        "tests/test_search.py": test_src,
+    }
+
+
 # =============================================================================
 # Task manifest
 # =============================================================================
@@ -909,6 +1134,15 @@ TASKS: List[Dict[str, Any]] = [
             "Fix all three so the tests pass."
         ),
         "_repo_factory": _make_task_5_repo,
+    },
+    {
+        "task_id": "task_6_pr",
+        "description": (
+            "PR #412: Document search ranking is broken — CI is red on three files: "
+            "search/indexer.py, search/scorer.py, and search/ranker.py. "
+            "Fix all three bugs so the full test suite passes."
+        ),
+        "_repo_factory": _make_task_6_repo,
     },
 ]
 
@@ -993,10 +1227,16 @@ def grade_task_5_pr(workspace_dir: str) -> float:
     return _run_pytest(workspace_dir)
 
 
+def grade_task_6_pr(workspace_dir: str) -> float:
+    """Grader: tokenizer punctuation, relevance scorer, coupled ranking trap."""
+    return _run_pytest(workspace_dir)
+
+
 GRADERS: Dict[str, Callable[[str], float]] = {
     "task_1_pr": grade_task_1_pr,
     "task_2_pr": grade_task_2_pr,
     "task_3_pr": grade_task_3_pr,
     "task_4_pr": grade_task_4_pr,
     "task_5_pr": grade_task_5_pr,
+    "task_6_pr": grade_task_6_pr,
 }

@@ -38,6 +38,12 @@ tasks:
     difficulty: very-hard
     grader: tasks.grade_task_5_pr
 
+  - id: task_6_pr
+    description: "Fix 3 coupled bugs in a search ranking pipeline: tokenizer, relevance scorer, and ranker — fixing scorer alone regresses a passing test"
+    steps: 10
+    difficulty: expert
+    grader: tasks.grade_task_6_pr
+
 action_model: AgentAction
 observation_model: CodeObservation
 state_model: ReviewState

@@ -7,21 +7,16 @@ memorise answers — it must read the code, understand the bug, and fix the
 algorithm correctly.
 
 Difficulty progression:
-  task_1_pr  Medium        — 3 bugs, user registration
-  task_2_pr  Medium-Hard   — 3 bugs, order pricing (random prices/rates)
-  task_3_pr  Hard          — 3 bugs, async payment processor
-  task_4_pr  Hard          — 3 bugs, LRU cache
-  task_5_pr  Very Hard     — 3 algorithmic bugs, analytics pipeline
-                             (EMA formula, sample vs population std, window boundary)
-                             All test values computed from the random seed —
-                             the LLM must understand the maths to fix the code.
-  task_6_pr  Expert        — 3 coupled bugs, search ranking pipeline
-                             (tokenizer, relevance scorer, ranker — coupled trap)
-  task_7_pr  Expert        — 3 config type bugs, service startup gate
-                             (string configs cause TypeErrors; restart_service required)
-  task_8_pr  Expert        — 3 migration bugs, database init gate
-                             (wrong sort order, silent exception, multi-stmt execute;
-                              inspect_logs + restart_service required)
+  task_1_pr  Medium        — 3 bugs, user registration (INC-001)
+  task_2_pr  Medium-Hard   — 3 bugs, order pricing (INC-019)
+  task_3_pr  Hard          — 3 bugs, async payment processor (INC-034)
+  task_4_pr  Hard          — 3 bugs, LRU cache (INC-056)
+  task_5_pr  Very Hard     — 3 algorithmic bugs, analytics pipeline (INC-121)
+  task_6_pr  Expert        — 3 coupled bugs, search ranking (INC-312)
+  task_7_pr  Expert        — 3 config type bugs + restart gate (INC-031)
+  task_8_pr  Expert        — 3 migration bugs + inspect/restart gate (INC-047)
+  task_9_pr  Expert        — 3 memory-leak bugs + OOM restart gate (INC-089)
+  task_10_pr Expert        — 3 network/circuit bugs + cascade trap (INC-201)
 """
 import re
 import subprocess
@@ -1092,6 +1087,491 @@ def test_rank_preserves_count():
     }
 
 
+def _make_task_9_repo(seed: int) -> dict:
+    """
+    Memory Leak + OOM Kill — 3 bugs in app/cache.py and app/processor.py.
+
+      1. Cache.__init__: plain list instead of bounded container
+         → cache grows without bound, no eviction on add()
+      2. Cache.add: no maxsize check — oldest entries never evicted
+         Fix: enforce len <= CACHE_MAXSIZE, evict oldest before appending
+      3. processor.py: module-level _processed_log list retains every
+         processed event forever — memory leak on long-running service
+         Fix: remove or bound the module-level accumulator
+
+    After fixing the leaks, the agent must call restart_service.
+    app_init.py simulates a load burst and checks that cache is bounded
+    and the processor has no unbounded accumulator.
+    test_service_state_running ONLY passes after restart_service with
+    fixed code — it reads service_state.json for status="running".
+
+    Randomised per episode:
+      • CACHE_MAXSIZE (20, 25, 30, 35, or 40)
+    """
+    rng = random.Random(seed)
+    maxsize = rng.choice([20, 25, 30, 35, 40])
+
+    cache_src = (
+        '"""In-memory event cache with LRU eviction.\n\n'
+        'CACHE_MAXSIZE controls the maximum number of entries.\n'
+        'When full, the oldest entry must be evicted before adding the new one.\n'
+        '"""\n'
+        "from collections import deque\n"
+        "\n"
+        f"CACHE_MAXSIZE = {maxsize}  # Maximum entries; enforce in add()\n"
+        "\n"
+        "class Cache:\n"
+        '    """Bounded event cache. Must never exceed CACHE_MAXSIZE entries."""\n'
+        "\n"
+        "    def __init__(self):\n"
+        "        # BUG 1: plain list instead of bounded container.\n"
+        "        # Fix: self._store = deque(maxlen=CACHE_MAXSIZE)\n"
+        "        self._store = []\n"
+        "\n"
+        "    def add(self, key: str, value) -> None:\n"
+        '        """Add or update an entry. Must evict oldest when at capacity."""\n'
+        "        # BUG 2: no eviction — appends forever, memory grows without bound.\n"
+        "        # Fix: while len(self._store) >= CACHE_MAXSIZE: self._store.pop(0)\n"
+        "        self._store.append((key, value))\n"
+        "\n"
+        "    def get(self, key: str):\n"
+        '        """Return most recent value for key, or None if not present."""\n'
+        "        for k, v in reversed(self._store):\n"
+        "            if k == key:\n"
+        "                return v\n"
+        "        return None\n"
+        "\n"
+        "    def __len__(self) -> int:\n"
+        "        return len(self._store)\n"
+        "\n"
+        "    def clear(self) -> None:\n"
+        "        self._store.clear()\n"
+    )
+
+    processor_src = (
+        '"""Event processor — transforms raw events into structured records."""\n'
+        "\n"
+        "# BUG 3: module-level list accumulates every processed event forever.\n"
+        "# On a long-running service this causes an unbounded memory leak.\n"
+        "# Fix: remove _processed_log entirely (return count from a local var),\n"
+        "#      or use a ring-buffer: deque(maxlen=N).\n"
+        "_processed_log = []\n"
+        "\n"
+        "def process_event(event: dict) -> dict:\n"
+        '    """Process a raw event dict and return a structured record."""\n'
+        "    record = {\n"
+        '        "id":   event.get("id", "unknown"),\n'
+        '        "type": event.get("type", "generic"),\n'
+        '        "size": len(str(event)),\n'
+        "    }\n"
+        "    _processed_log.append(record)  # BUG 3: never cleared\n"
+        "    return record\n"
+        "\n"
+        "def processed_count() -> int:\n"
+        '    """Return the number of events in the accumulator."""\n'
+        "    return len(_processed_log)\n"
+    )
+
+    app_init_src = (
+        '#!/usr/bin/env python3\n'
+        '"""Service initializer. Validates cache is bounded and processor has no unbounded state.\n\n'
+        "Run after fixing app/cache.py and app/processor.py to verify memory safety.\n"
+        'Writes service_state.json with status="running" on success, "oom_killed" on failure.\n'
+        '"""\n'
+        "import json, os, sys, datetime\n"
+        "\n"
+        'STATE_PATH = "service_state.json"\n'
+        'LOG_PATH   = "service.log"\n'
+        "\n"
+        "def _log(level: str, msg: str):\n"
+        "    ts = datetime.datetime.utcnow().isoformat() + 'Z'\n"
+        "    with open(LOG_PATH, 'a') as f:\n"
+        "        f.write(f'{ts} {level} {msg}\\n')\n"
+        "\n"
+        "def main():\n"
+        "    try:\n"
+        "        from app.cache import Cache, CACHE_MAXSIZE\n"
+        "        from app.processor import process_event, processed_count\n"
+        "\n"
+        "        cache = Cache()\n"
+        "        burst = CACHE_MAXSIZE * 3\n"
+        "\n"
+        "        for i in range(burst):\n"
+        '            cache.add(f"key-{i}", {"data": "x" * 64})\n'
+        '            process_event({"id": i, "type": "load-test"})\n'
+        "\n"
+        "        if len(cache) > CACHE_MAXSIZE:\n"
+        "            raise MemoryError(\n"
+        "                f'Cache grew to {len(cache)} items (CACHE_MAXSIZE={CACHE_MAXSIZE}). '\n"
+        "                'Memory leak: cache.add() never evicts — add eviction logic.'\n"
+        "            )\n"
+        "        pc = processed_count()\n"
+        "        if pc > CACHE_MAXSIZE * 2:\n"
+        "            raise MemoryError(\n"
+        "                f'Processor accumulated {pc} records after {burst} events. '\n"
+        "                'Memory leak: _processed_log grows without bound.'\n"
+        "            )\n"
+        "        _log('INFO', f'Load burst OK: cache={len(cache)}/{CACHE_MAXSIZE} processed={pc}')\n"
+        "        state = {'status': 'running', 'pid': os.getpid(),\n"
+        "                 'cache_size': len(cache), 'processed': pc}\n"
+        "        with open(STATE_PATH, 'w') as f:\n"
+        "            json.dump(state, f)\n"
+        "        print(f'Service started: cache={len(cache)}/{CACHE_MAXSIZE} processed={pc}')\n"
+        "        return 0\n"
+        "    except MemoryError as e:\n"
+        "        _log('FATAL', f'OOM killed: {e}')\n"
+        "        state = {'status': 'oom_killed', 'last_error': str(e)}\n"
+        "        with open(STATE_PATH, 'w') as f:\n"
+        "            json.dump(state, f)\n"
+        "        print(f'OOM killed: {e}', file=sys.stderr)\n"
+        "        return 1\n"
+        "    except Exception as e:\n"
+        "        _log('ERROR', f'Crash: {e}')\n"
+        "        state = {'status': 'crashed', 'last_error': str(e)}\n"
+        "        with open(STATE_PATH, 'w') as f:\n"
+        "            json.dump(state, f)\n"
+        "        print(f'Crash: {e}', file=sys.stderr)\n"
+        "        return 1\n"
+        "\n"
+        'if __name__ == "__main__":\n'
+        "    sys.exit(main())\n"
+    )
+
+    service_log_src = (
+        "2026-01-01T00:00:01Z FATAL OOM killed: Cache grew to 63 items "
+        f"(CACHE_MAXSIZE={maxsize}). Memory leak: cache.add() never evicts.\n"
+        f"2026-01-01T00:00:01Z FATAL OOM killed: Processor accumulated 63 records "
+        f"after 60 events. Memory leak: _processed_log grows without bound.\n"
+    )
+    service_state_src = (
+        '{"status": "oom_killed", '
+        '"last_error": "Cache grew without bound — memory leak in add()"}\n'
+    )
+
+    test_template = """\
+import json
+import os
+import importlib
+import pytest
+from app.cache import Cache, CACHE_MAXSIZE
+
+
+def test_cache_bounded_after_burst():
+    \"\"\"Cache must not exceed CACHE_MAXSIZE entries after adding 3x the limit.\"\"\"
+    cache = Cache()
+    for i in range(CACHE_MAXSIZE * 3):
+        cache.add(f"k{{i}}", i)
+    assert len(cache) <= CACHE_MAXSIZE, (
+        f"Memory Leak: cache grew to {{len(cache)}} entries (limit {{CACHE_MAXSIZE}}). "
+        "Fix: add eviction in cache.add() — remove oldest entry when at capacity."
+    )
+
+
+def test_cache_evicts_oldest():
+    \"\"\"When cache is full, the oldest entry must be evicted.\"\"\"
+    cache = Cache()
+    for i in range(CACHE_MAXSIZE + 5):
+        cache.add(f"k{{i}}", i)
+    assert cache.get("k0") is None, (
+        "Memory Leak: oldest cache entry 'k0' still present after exceeding maxsize. "
+        "Fix: evict oldest before appending in cache.add()."
+    )
+
+
+def test_cache_latest_entry_retrievable():
+    \"\"\"Most recently added entry must still be accessible after the cache fills.\"\"\"
+    cache = Cache()
+    for i in range(CACHE_MAXSIZE + 5):
+        cache.add(f"k{{i}}", i * 10)
+    last_key = f"k{{CACHE_MAXSIZE + 4}}"
+    assert cache.get(last_key) == (CACHE_MAXSIZE + 4) * 10, (
+        "Cache Error: most recent entry not retrievable after cache filled."
+    )
+
+
+def test_processor_does_not_accumulate_unbounded():
+    \"\"\"Processor must not retain more than 2*CACHE_MAXSIZE records across a burst.\"\"\"
+    import app.processor as proc_mod
+    importlib.reload(proc_mod)
+    burst = CACHE_MAXSIZE * 3
+    for i in range(burst):
+        proc_mod.process_event({"id": i, "type": "test"})
+    count = proc_mod.processed_count()
+    assert count <= CACHE_MAXSIZE * 2, (
+        f"Memory Leak: processor retained {{count}} records after {{burst}} events. "
+        "Fix: remove or bound the module-level _processed_log list "
+        "(e.g. use deque(maxlen=N) or delete it entirely)."
+    )
+
+
+def test_service_state_running():
+    \"\"\"service_state.json must show status='running' after restart_service.
+
+    Workflow:
+      1. Fix app/cache.py (add eviction logic — Bug 1 + Bug 2).
+      2. Fix app/processor.py (remove unbounded _processed_log — Bug 3).
+      3. Call restart_service — app_init.py validates memory safety and
+         writes service_state.json with status='running'.
+      4. This test then passes.
+    \"\"\"
+    assert os.path.isfile("service_state.json"), (
+        "service_state.json not found. Fix memory leaks, then call restart_service "
+        "to run app_init.py which validates cache bounds and writes service_state.json."
+    )
+    with open("service_state.json") as f:
+        state = json.load(f)
+    status = state.get("status")
+    assert status == "running", (
+        f"Service not running: status={{status!r}}. "
+        "last_error=" + repr(state.get("last_error", "none")) + ". "
+        "Use inspect_logs to read service.log. Fix the memory leaks, then call restart_service."
+    )
+"""
+
+    return {
+        "app/__init__.py": "",
+        "app/cache.py": cache_src,
+        "app/processor.py": processor_src,
+        "app_init.py": app_init_src,
+        "service.log": service_log_src,
+        "service_state.json": service_state_src,
+        "tests/__init__.py": "",
+        "tests/test_memory.py": test_template,
+    }
+
+
+def _make_task_10_repo(seed: int) -> dict:
+    """
+    Network Timeout Cascade + Circuit Breaker Bugs — 3 bugs across 3 files.
+
+      1. config/network.py: CONNECT_TIMEOUT = 0.001 (too small, causes spurious
+         timeouts that cascade across dependent services).
+         Fix: set to a value in [0.1, 60.0] (e.g. the seeded correct_timeout).
+         TRAP: setting CONNECT_TIMEOUT > 60.0 fails the range test.
+
+      2. services/client.py: range(retries + 1) runs one too many attempts
+         (e.g. retries=3 produces 4 attempts: 0,1,2,3).
+         Fix: range(retries)
+
+      3. services/circuit_breaker.py: opens circuit after just 1 failure
+         (threshold check is >= 1 instead of >= failure_threshold).
+         Fix: use >= self.failure_threshold
+
+    Randomised per episode:
+      • correct_timeout (2.0, 3.0, 5.0, or 10.0) — seeded but test checks range, not value
+      • failure_threshold (3, 4, or 5) — embedded in tests as required consecutive failures
+    """
+    rng = random.Random(seed)
+    correct_timeout  = rng.choice([2.0, 3.0, 5.0, 10.0])
+    failure_threshold = rng.choice([3, 4, 5])
+    max_retries       = rng.choice([2, 3, 4])
+
+    network_src = (
+        '"""Network configuration for service clients."""\n'
+        "\n"
+        "# BUG 1: CONNECT_TIMEOUT is dangerously low — causes spurious timeouts\n"
+        "# that cascade to every dependent service.\n"
+        f"# Fix: set to a value in [0.1, 60.0] (e.g. {correct_timeout})\n"
+        "CONNECT_TIMEOUT = 0.001\n"
+        "\n"
+        f"# MAX_RETRIES: number of retry attempts on transient failure\n"
+        f"MAX_RETRIES = {max_retries}\n"
+    )
+
+    client_src = (
+        '"""HTTP service client with retry-on-timeout."""\n'
+        "import time\n"
+        "from config.network import CONNECT_TIMEOUT, MAX_RETRIES\n"
+        "\n"
+        "class ServiceClient:\n"
+        '    """Thin HTTP client with configurable retry behaviour."""\n'
+        "\n"
+        "    def __init__(self, base_url: str):\n"
+        "        self.base_url = base_url\n"
+        "\n"
+        "    def request(self, endpoint: str, retries: int = MAX_RETRIES) -> dict:\n"
+        '        """Make a request; retry up to `retries` times on TimeoutError."""\n'
+        "        last_err = None\n"
+        "        # BUG 2: range(retries + 1) runs one extra attempt.\n"
+        "        # With retries=3 this produces attempts 0,1,2,3 (four total).\n"
+        "        # Fix: range(retries)  (attempts 0,1,2 — exactly three)\n"
+        "        for attempt in range(retries + 1):\n"
+        "            try:\n"
+        "                return self._do_request(endpoint)\n"
+        "            except TimeoutError as e:\n"
+        "                last_err = e\n"
+        "                time.sleep(0.0)  # no real delay in tests\n"
+        "        raise last_err\n"
+        "\n"
+        "    def _do_request(self, endpoint: str) -> dict:\n"
+        "        # Overridden in tests; real impl would use requests/httpx\n"
+        "        return {'status': 'ok', 'endpoint': endpoint}\n"
+    )
+
+    cb_src = (
+        '"""Circuit breaker pattern for cascading-failure protection."""\n'
+        "import time\n"
+        "\n"
+        "class CircuitBreaker:\n"
+        '    """Opens after failure_threshold consecutive failures; closes after reset_timeout."""\n'
+        "\n"
+        "    def __init__(self, failure_threshold: int = "
+        f"{failure_threshold}, reset_timeout: float = 60.0):\n"
+        "        self.failure_threshold = failure_threshold\n"
+        "        self.reset_timeout     = reset_timeout\n"
+        "        self._failure_count    = 0\n"
+        "        self._state            = 'closed'  # closed | open | half-open\n"
+        "        self._last_failure_ts  = None\n"
+        "\n"
+        "    def call(self, func, *args, **kwargs):\n"
+        '        """Execute func through the circuit breaker."""\n'
+        "        if self._state == 'open':\n"
+        "            if (self._last_failure_ts is not None and\n"
+        "                    time.time() - self._last_failure_ts > self.reset_timeout):\n"
+        "                self._state = 'half-open'\n"
+        "            else:\n"
+        "                raise RuntimeError('Circuit breaker is OPEN — failing fast')\n"
+        "        try:\n"
+        "            result = func(*args, **kwargs)\n"
+        "            if self._state == 'half-open':\n"
+        "                self._state = 'closed'\n"
+        "                self._failure_count = 0\n"
+        "            return result\n"
+        "        except Exception:\n"
+        "            self._failure_count += 1\n"
+        "            self._last_failure_ts = time.time()\n"
+        "            # BUG 3: opens circuit after just 1 failure instead of failure_threshold.\n"
+        "            # Fix: >= self.failure_threshold\n"
+        "            if self._failure_count >= 1:\n"
+        "                self._state = 'open'\n"
+        "            raise\n"
+    )
+
+    test_template = """\
+\"\"\"Tests for INC-201: network timeout cascade and circuit breaker misbehaviour.
+
+Bug 1: CONNECT_TIMEOUT is 0.001 s — causes cascade of spurious timeouts.
+       TRAP: setting it > 60.0 also fails this test. Valid range: [0.1, 60.0].
+Bug 2: ServiceClient.request uses range(retries + 1) — one too many attempts.
+Bug 3: CircuitBreaker opens after 1 failure instead of {failure_threshold} consecutive.
+\"\"\"
+import pytest
+from config.network import CONNECT_TIMEOUT, MAX_RETRIES
+from services.client import ServiceClient
+from services.circuit_breaker import CircuitBreaker
+
+
+def test_connect_timeout_in_valid_range():
+    \"\"\"CONNECT_TIMEOUT must be in [0.1, 60.0] — too small cascades, too large delays detection.\"\"\"
+    assert isinstance(CONNECT_TIMEOUT, (int, float)), (
+        "Config Error: CONNECT_TIMEOUT must be a number."
+    )
+    assert 0.1 <= CONNECT_TIMEOUT <= 60.0, (
+        f"Config Error: CONNECT_TIMEOUT={{CONNECT_TIMEOUT}} is outside [0.1, 60.0]. "
+        "Too small (< 0.1) causes spurious timeouts under normal load. "
+        "Too large (> 60.0) masks real failures. Set to a value like {correct_timeout}."
+    )
+
+
+def test_client_retries_exact_count():
+    \"\"\"Client must attempt exactly MAX_RETRIES times on persistent failure.\"\"\"
+    attempts = []
+
+    def always_fail():
+        attempts.append(1)
+        raise TimeoutError("simulated timeout")
+
+    client = ServiceClient("http://test")
+    client._do_request = lambda ep: always_fail()
+
+    with pytest.raises(TimeoutError):
+        client.request("/api", retries=MAX_RETRIES)
+
+    assert len(attempts) == MAX_RETRIES, (
+        f"Client Bug: expected {{MAX_RETRIES}} attempts (retries={{MAX_RETRIES}}), "
+        f"got {{len(attempts)}}. Fix: use range(retries) not range(retries + 1)."
+    )
+
+
+def test_circuit_stays_closed_on_isolated_failure():
+    \"\"\"A single transient failure must NOT open the circuit breaker.\"\"\"
+    cb = CircuitBreaker(failure_threshold={failure_threshold}, reset_timeout=9999.0)
+    failed = [False]
+
+    def flaky():
+        if not failed[0]:
+            failed[0] = True
+            raise RuntimeError("transient failure")
+        return "ok"
+
+    with pytest.raises(RuntimeError):
+        cb.call(flaky)
+
+    assert cb._state == "closed", (
+        "Circuit Breaker Bug: circuit opened after a single failure. "
+        "Fix: only open circuit after {failure_threshold} consecutive failures "
+        "(change '>=1' to '>= self.failure_threshold')."
+    )
+
+
+def test_circuit_opens_after_consecutive_failures():
+    \"\"\"Circuit must open after exactly {failure_threshold} consecutive failures.\"\"\"
+    cb = CircuitBreaker(failure_threshold={failure_threshold}, reset_timeout=9999.0)
+
+    def always_fail():
+        raise RuntimeError("persistent failure")
+
+    for _ in range({failure_threshold}):
+        try:
+            cb.call(always_fail)
+        except RuntimeError:
+            pass
+
+    assert cb._state == "open", (
+        f"Circuit Breaker Bug: circuit is still '{{cb._state}}' after "
+        "{failure_threshold} consecutive failures. "
+        "Fix: open when _failure_count >= self.failure_threshold."
+    )
+
+
+def test_circuit_fast_fails_when_open():
+    \"\"\"When circuit is open, call() must raise without invoking the function.\"\"\"
+    cb = CircuitBreaker(failure_threshold={failure_threshold}, reset_timeout=9999.0)
+
+    def always_fail():
+        raise RuntimeError("failure")
+
+    for _ in range({failure_threshold}):
+        try:
+            cb.call(always_fail)
+        except RuntimeError:
+            pass
+
+    calls = []
+    with pytest.raises(RuntimeError):
+        cb.call(lambda: calls.append(1) or "ok")
+
+    assert not calls, (
+        "Circuit Breaker Bug: function was invoked even though circuit is OPEN. "
+        "Fast-fail must raise immediately without calling the wrapped function."
+    )
+"""
+    test_src = test_template.format(
+        failure_threshold=failure_threshold,
+        correct_timeout=correct_timeout,
+    )
+
+    return {
+        "config/__init__.py": "",
+        "config/network.py": network_src,
+        "services/__init__.py": "",
+        "services/client.py": client_src,
+        "services/circuit_breaker.py": cb_src,
+        "tests/__init__.py": "",
+        "tests/test_network.py": test_src,
+    }
+
+
 def _make_task_7_repo(seed: int) -> dict:
     """
     Service Config Type Errors — 3 bugs in config/settings.py.
@@ -1551,80 +2031,159 @@ TASKS: List[Dict[str, Any]] = [
     {
         "task_id": "task_1_pr",
         "description": (
-            "PR #47: User registration service is failing CI. "
-            "Validation rejects some valid inputs and the password storage "
-            "is flagged as insecure. Fix the bugs so the tests pass."
+            "INC-001: User registration service is rejecting valid sign-ups and "
+            "storing passwords insecurely. Email validation accepts empty local parts, "
+            "the minimum-length check is off-by-one, and passwords are hashed with MD5. "
+            "Fix all three bugs in users/ so the tests pass."
         ),
         "_repo_factory": _make_task_1_repo,
+        "_diagnosis_keywords": frozenset({
+            "regex", "plus", "one-or-more", "md5", "sha256", "sha-256",
+            "hashlib", "length", ">=", "minimum", "local", "empty",
+        }),
+        "_optimal_steps": 5,
     },
     {
         "task_id": "task_2_pr",
         "description": (
-            "PR #91: Order totals are wrong for quantity-based line items. "
-            "Discount and tax logic also produce incorrect results. "
-            "Fix the pricing engine so the tests pass."
+            "INC-019: Order totals are wrong after the pricing engine was refactored. "
+            "Quantity is ignored in subtotal calculation, discounts inflate the price "
+            "instead of reducing it, and tax is applied as a flat offset instead of "
+            "a multiplier. Fix all three bugs so the tests pass."
         ),
         "_repo_factory": _make_task_2_repo,
+        "_diagnosis_keywords": frozenset({
+            "quantity", "multiply", "discount", "subtract", "remove",
+            "tax", "multiplier", "1+", "rate", "offset",
+        }),
+        "_optimal_steps": 5,
     },
     {
         "task_id": "task_3_pr",
         "description": (
-            "PR #120: Stripe integration has three issues: a hardcoded live key, "
-            "a blocking sleep that stalls the event loop, and a retry loop that "
-            "runs one iteration too many. Fix all three so the tests pass."
+            "INC-034: Payment service is failing in production. Secrets scanner "
+            "flagged a hardcoded Stripe live key, async handlers are blocking the "
+            "event loop with a sync sleep, and the retry loop runs one iteration "
+            "too many. Fix all three so the tests pass."
         ),
         "_repo_factory": _make_task_3_repo,
+        "_diagnosis_keywords": frozenset({
+            "async", "await", "asyncio", "sleep", "getenv", "environment",
+            "range", "retry", "off-by-one", "hardcoded", "secret",
+        }),
+        "_optimal_steps": 5,
     },
     {
         "task_id": "task_4_pr",
         "description": (
-            "PR #173: LRU cache eviction is broken and the serialiser crashes "
-            "on null input. Fix all three bugs so the tests pass."
+            "INC-056: LRU cache is evicting the wrong entries and the serialiser "
+            "crashes on null input. Cache get() never calls move_to_end(), eviction "
+            "logic is missing from put(), and deserialize(None) raises TypeError. "
+            "Fix all three bugs so the tests pass."
         ),
         "_repo_factory": _make_task_4_repo,
+        "_diagnosis_keywords": frozenset({
+            "move_to_end", "popitem", "evict", "lru", "capacity",
+            "none", "guard", "serializer", "null", "ordereddict",
+        }),
+        "_optimal_steps": 5,
     },
     {
         "task_id": "task_5_pr",
         "description": (
-            "PR #261: Real-time analytics pipeline is producing incorrect metrics. "
-            "Three algorithmic bugs: wrong EMA weighting, wrong standard deviation "
-            "formula in the anomaly detector, and a sliding-window off-by-one. "
+            "INC-121: Real-time analytics pipeline is producing incorrect metrics. "
+            "Three algorithmic bugs: EMA formula has alpha and (1-alpha) swapped, "
+            "anomaly detector uses biased population std (false positives), and "
+            "sliding-window has an off-by-one that drops the last window. "
             "Fix all three so the tests pass."
         ),
         "_repo_factory": _make_task_5_repo,
+        "_diagnosis_keywords": frozenset({
+            "alpha", "swap", "ema", "population", "sample", "ddof",
+            "range", "window", "off-by-one", "+1", "biased", "std",
+        }),
+        "_optimal_steps": 6,
     },
     {
         "task_id": "task_6_pr",
         "description": (
-            "PR #412: Document search ranking is broken — CI is red on three files: "
-            "search/indexer.py, search/scorer.py, and search/ranker.py. "
-            "Fix all three bugs so the full test suite passes."
+            "INC-312: Search quality regression after scorer refactor. "
+            "CI is red on three files: indexer strips only whitespace (not punctuation), "
+            "scorer divides by doc length (penalises long documents), and ranker sorts "
+            "ascending. WARNING: fixing the scorer alone causes a currently-passing "
+            "ranking test to regress — both scorer and ranker must be fixed together."
         ),
         "_repo_factory": _make_task_6_repo,
+        "_diagnosis_keywords": frozenset({
+            "re.split", "punctuation", "split", "query_terms", "len",
+            "reverse", "descending", "coupled", "regression", "together",
+        }),
+        "_optimal_steps": 6,
     },
     {
         "task_id": "task_7_pr",
         "description": (
-            "INC-031: The request-handling service fails to start after the config "
-            "was last edited. All three config values in config/settings.py have bugs: "
-            "TIMEOUT and MAX_WORKERS are string literals instead of ints (causing "
-            "TypeError in arithmetic and range()), and RETRY_DELAY is negative. "
-            "Fix the config, then call restart_service to apply changes and bring "
-            "the service back online."
+            "INC-031: Request-handling service fails to start after config was last "
+            "edited. config/settings.py has three bugs: TIMEOUT and MAX_WORKERS are "
+            "string literals instead of ints (TypeError in arithmetic and range()), "
+            "and RETRY_DELAY is negative (retry storms). "
+            "Fix the config, then call restart_service to apply changes."
         ),
         "_repo_factory": _make_task_7_repo,
+        "_diagnosis_keywords": frozenset({
+            "string", "str", "int", "type", "timeout", "max_workers",
+            "retry_delay", "negative", "quote", "literal", "typeerror",
+        }),
+        "_optimal_steps": 6,
     },
     {
         "task_id": "task_8_pr",
         "description": (
-            "INC-047: Database migrations are failing silently after the migration "
-            "script was refactored. db/migrator.py has three bugs: migrations run in "
-            "lexicographic order (10 before 2), exceptions are swallowed silently, "
-            "and multi-statement SQL files only execute their first statement. "
-            "Use inspect_logs to see what migration.log recorded, fix all three "
-            "bugs, then call restart_service to apply the migrations and create app.db."
+            "INC-047: Database migrations are failing silently after migration script "
+            "refactor. db/migrator.py has three bugs: lexicographic sort runs "
+            "'10_add_indexes' before '2_create_posts', exceptions are swallowed with "
+            "bare pass (invisible failures), and conn.execute() drops multi-statement "
+            "SQL. Use inspect_logs, fix all three, then call restart_service."
         ),
         "_repo_factory": _make_task_8_repo,
+        "_diagnosis_keywords": frozenset({
+            "sort", "lexicographic", "numeric", "executescript", "execute",
+            "silent", "exception", "migration", "pass", "swallowed",
+        }),
+        "_optimal_steps": 7,
+    },
+    {
+        "task_id": "task_9_pr",
+        "description": (
+            "INC-089: Service is being OOM-killed under load. inspect_logs shows "
+            "service.log has two memory leak errors. app/cache.py never evicts "
+            "entries (unbounded list), and app/processor.py accumulates every "
+            "processed event in a module-level list. "
+            "Fix both leaks, then call restart_service to verify memory safety."
+        ),
+        "_repo_factory": _make_task_9_repo,
+        "_diagnosis_keywords": frozenset({
+            "leak", "unbounded", "evict", "maxsize", "bounded", "clear",
+            "accumulate", "memory", "oom", "deque", "list", "module-level",
+        }),
+        "_optimal_steps": 7,
+    },
+    {
+        "task_id": "task_10_pr",
+        "description": (
+            "INC-201: Cascading timeout failures across all services after a config "
+            "change. Three bugs: CONNECT_TIMEOUT is 0.001 s (causes spurious "
+            "timeouts — but setting it > 60.0 also breaks the range test), "
+            "ServiceClient retries one too many times (range off-by-one), and "
+            "CircuitBreaker opens after just 1 failure instead of the configured "
+            "threshold. Fix all three bugs so the tests pass."
+        ),
+        "_repo_factory": _make_task_10_repo,
+        "_diagnosis_keywords": frozenset({
+            "timeout", "connect_timeout", "range", "retries", "off-by-one",
+            "circuit", "consecutive", "threshold", "failure_threshold", "cascade",
+        }),
+        "_optimal_steps": 6,
     },
 ]
 
@@ -1724,13 +2283,25 @@ def grade_task_8_pr(workspace_dir: str) -> float:
     return _run_pytest(workspace_dir)
 
 
+def grade_task_9_pr(workspace_dir: str) -> float:
+    """Grader: memory-leak cache + processor, OOM-restart gate."""
+    return _run_pytest(workspace_dir)
+
+
+def grade_task_10_pr(workspace_dir: str) -> float:
+    """Grader: network timeout, retry off-by-one, circuit-breaker threshold."""
+    return _run_pytest(workspace_dir)
+
+
 GRADERS: Dict[str, Callable[[str], float]] = {
-    "task_1_pr": grade_task_1_pr,
-    "task_2_pr": grade_task_2_pr,
-    "task_3_pr": grade_task_3_pr,
-    "task_4_pr": grade_task_4_pr,
-    "task_5_pr": grade_task_5_pr,
-    "task_6_pr": grade_task_6_pr,
-    "task_7_pr": grade_task_7_pr,
-    "task_8_pr": grade_task_8_pr,
+    "task_1_pr":  grade_task_1_pr,
+    "task_2_pr":  grade_task_2_pr,
+    "task_3_pr":  grade_task_3_pr,
+    "task_4_pr":  grade_task_4_pr,
+    "task_5_pr":  grade_task_5_pr,
+    "task_6_pr":  grade_task_6_pr,
+    "task_7_pr":  grade_task_7_pr,
+    "task_8_pr":  grade_task_8_pr,
+    "task_9_pr":  grade_task_9_pr,
+    "task_10_pr": grade_task_10_pr,
 }

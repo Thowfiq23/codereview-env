@@ -1,7 +1,7 @@
 spec_version: 1
 name: codereview-env
-version: 2.0.0
-description: "Execution-grounded software incident repair benchmark — 8 seeded tasks spanning code review, service restart gates, and DB migration ordering."
+version: 3.0.0
+description: "Execution-grounded software incident repair benchmark — 10 seeded tasks spanning code review, memory leaks, network timeout cascades, service restart gates, and DB migration ordering. Multi-component reward with 6-factor scoring."
 type: space
 runtime: fastapi
 app: server.app:app
@@ -56,6 +56,18 @@ tasks:
     difficulty: expert
     grader: tasks.grade_task_8_pr
 
+  - id: task_9_pr
+    description: "Fix 3 memory-leak bugs (unbounded list cache, missing eviction, module-level accumulator) then call restart_service to recover from OOM-killed state"
+    steps: 10
+    difficulty: expert
+    grader: tasks.grade_task_9_pr
+
+  - id: task_10_pr
+    description: "Fix 3 network-timeout cascade bugs (CONNECT_TIMEOUT two-sided trap, retry off-by-one, circuit breaker wrong threshold) — wrong timeout value fails even after correct retry logic"
+    steps: 10
+    difficulty: expert
+    grader: tasks.grade_task_10_pr
+
 action_model: AgentAction
 observation_model: CodeObservation
 state_model: ReviewState
@@ -71,6 +83,8 @@ observation_space:
     step_number:     {type: integer, description: "Steps consumed so far"}
     done:            {type: boolean, description: "True when episode has ended"}
     reward:          {type: float,   description: "Reward earned this step"}
+    logs:            {type: array,   description: "Structured log entries [{ts, level, msg}] from last service operation"}
+    service_status:  {type: object,  description: "Service health state for incident tasks (status, health details)"}
 
 action_space:
   type: tool_call
@@ -93,11 +107,15 @@ action_space:
       description: "Overwrite a source file with fixed content (triggers delta reward)"
       required_fields: [action_type, target_file, new_content]
     - name: restart_service
-      description: "Run app_init.py to apply config/migration changes (tasks 7 & 8)"
+      description: "Run app_init.py to apply config/migration/memory-fix changes (tasks 7, 8 & 9)"
       required_fields: [action_type]
     - name: submit_fix
-      description: "Declare fix complete with root-cause analysis; triggers final grading"
+      description: "Declare fix complete with root-cause analysis; triggers 6-component terminal grading"
       required_fields: [action_type, root_cause]
+    - name: submit_review
+      description: "Backward-compatible alias for submit_fix"
+      required_fields: [action_type]
+      optional_fields: [root_cause, summary]
     - name: execute_command
       description: "Escape-hatch: run any bash command in the isolated sandbox"
       required_fields: [action_type, command]
@@ -107,6 +125,13 @@ scoring:
   success_threshold: 0.5
   score_formula: sum(rewards) / max_total_reward
   max_total_reward: 2.0
+  terminal_components:
+    test_quality:    {weight: 0.40, description: "Fraction of tests passing at submit time"}
+    diagnosis:       {weight: 0.15, description: "root_cause keyword match against per-task ground truth"}
+    efficiency:      {weight: 0.15, description: "optimal_steps / actual_steps (capped at 1.0)"}
+    exploration:     {weight: 0.10, description: "Unique action types used / 5 (capped at 1.0)"}
+    trap_avoidance:  {weight: 0.10, description: "1.0 - 0.2 * trap_count (floored at 0.0)"}
+    submit_credit:   {weight: 0.10, description: "Fixed credit for reaching submit at all"}
 
 constraints:
   max_runtime_seconds: 1200
@@ -118,4 +143,6 @@ tags:
   - swe-bench
   - execution-sandbox
   - incident-repair
+  - memory-leak
+  - network-timeout
   - openenv

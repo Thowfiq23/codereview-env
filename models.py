@@ -58,28 +58,42 @@ class AgentAction(BaseModel):
     root_cause: Optional[str] = Field(
         None,
         description="Root-cause analysis for submit_fix (e.g. 'TIMEOUT was str not int; "
-                    "migration sort was lexicographic not numeric'). Recorded in episode metadata."
+                    "migration sort was lexicographic not numeric'). Scored against "
+                    "per-task diagnosis keywords — contributes 15%% of terminal reward."
     )
 
 
 class CodeObservation(BaseModel):
     """Observation returned by reset() and step()."""
     task_id:         str        = Field(..., description="Task identifier, e.g. 'task_1_pr'")
-    context:         str        = Field(..., description="PR description shown to the agent")
+    context:         str        = Field(..., description="Incident/PR description shown to the agent")
     available_files: List[str]  = Field(..., description="Files present in the sandbox")
     action_result:   str        = Field(..., description="Stdout/stderr of the last command, or a status message")
     step_number:     int        = Field(..., description="Number of steps taken so far in this episode")
     done:            bool       = Field(..., description="True when the episode has ended")
-    reward:          float      = Field(..., description="Reward earned this step. Range: [-0.1, 1.0]. Negative for destructive actions (path traversal, test tampering).")
+    reward:          float      = Field(..., description="Reward earned this step. Range: [-0.1, 1.0].")
+    # Structured diagnostic fields — populated for service/incident tasks
+    logs: List[Dict[str, str]]  = Field(
+        default_factory=list,
+        description="Structured timestamped log entries from the most recent service operation. "
+                    "Each entry has 'ts', 'level', and 'msg' keys."
+    )
+    service_status: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Current service health state for incident tasks (7-10). "
+                    "Contains 'status' (crashed/degraded/running/healthy), 'health' details."
+    )
 
 
 class EpisodeReward(BaseModel):
     """Typed reward model as required by OpenEnv spec."""
-    value:       float            = Field(..., description="Scalar reward in [-0.1, 1.0]. Negative values signal destructive actions.")
+    value:       float            = Field(..., description="Scalar reward in [-0.1, 1.0].")
     is_terminal: bool             = Field(False, description="True if this reward ends the episode")
     breakdown:   Dict[str, float] = Field(
         default_factory=dict,
-        description="Per-component breakdown: test_pass_rate (0.0–1.0) and shaped_reward (the actual step reward)."
+        description="Per-component breakdown: test_quality, diagnosis, efficiency, "
+                    "exploration, trap_avoidance, submit_credit (terminal only), "
+                    "plus test_pass_rate and shaped_reward for non-terminal steps."
     )
 
 
@@ -88,9 +102,14 @@ class ReviewState(BaseModel):
     episode_id:          str   = Field(..., description="UUID of the current episode")
     task_id:             str   = Field(..., description="Task currently active")
     step_count:          int   = Field(..., description="Steps taken in this episode")
-    current_task_index:  int   = Field(..., description="Index into the TASKS list (cycles 0→1→…→5→0)")
-    total_reward:        float = Field(0.0, description="Highest reward achieved so far this episode")
-    done:                bool  = Field(..., description="True when the episode has ended")
+    current_task_index:  int   = Field(..., description="Index into the TASKS list (cycles 0→…→9→0)")
+    total_reward:        float = Field(0.0,     description="Highest reward achieved so far this episode")
+    done:                bool  = Field(...,     description="True when the episode has ended")
+    # Causal state graph tracking (incident tasks)
+    system_health:       str   = Field("unknown", description="Current system health: crashed/degraded/running/healthy/unknown")
+    progress_depth:      int   = Field(0,       description="Number of causal state improvements made this episode")
+    trap_count:          int   = Field(0,       description="Number of actions that worsened or had no effect on system state")
+    optimal_steps:       int   = Field(0,       description="Known optimal step count for the active task (set at reset)")
 
 
 class StepResponse(BaseModel):

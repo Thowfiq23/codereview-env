@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import uuid
@@ -5,7 +6,7 @@ import platform
 import subprocess
 import shutil
 from subprocess import TimeoutExpired
-from typing import Dict, Any, Tuple, Optional
+from typing import Dict, Any, Tuple, Optional, List, Set
 
 from models import AgentAction, CodeObservation, ReviewState
 from tasks import TASKS, GRADERS
@@ -21,19 +22,17 @@ WORKSPACE_BASE = os.getenv(
 MAX_STEPS = 10
 
 # Minimal clean environment passed to all subprocesses.
-# Deliberately excludes server credentials (HF_TOKEN, API keys, etc.)
 _CLEAN_ENV_KEYS = {"PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "USER", "LOGNAME"}
-
-# Windows requires these vars for Python/subprocess to initialise correctly.
 _WINDOWS_ENV_KEYS = {"SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "TEMP", "TMP", "COMSPEC"}
 
-# Pytest/Python control files that can override test discovery and behaviour
-# when placed anywhere in the workspace tree. An agent must not be allowed to
-# create these unless they were present in the original task repository.
+# Pytest/Python control files that can override test discovery.
 _PYTEST_CONTROL_NAMES = frozenset({
     "conftest.py", "pytest.ini", "pyproject.toml", "setup.cfg",
     "tox.ini", "sitecustomize.py", ".pytest.ini",
 })
+
+# Tasks that include a service component (have app_init.py + state artifacts).
+_SERVICE_TASKS = frozenset({"task_7_pr", "task_8_pr", "task_9_pr"})
 
 
 def _make_clean_env(pythonpath: str) -> Dict[str, str]:
@@ -49,6 +48,26 @@ def _make_clean_env(pythonpath: str) -> Dict[str, str]:
     return clean
 
 
+def _parse_log_file(path: str) -> List[Dict[str, str]]:
+    """Parse a structured log file into a list of {ts, level, msg} dicts."""
+    entries = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.rstrip()
+                if not line:
+                    continue
+                # Format: "2026-01-01T00:00:01Z LEVEL message..."
+                parts = line.split(" ", 2)
+                if len(parts) == 3:
+                    entries.append({"ts": parts[0], "level": parts[1], "msg": parts[2]})
+                else:
+                    entries.append({"ts": "", "level": "INFO", "msg": line})
+    except Exception:
+        pass
+    return entries[-50:]  # keep last 50 entries
+
+
 class CodeReviewEnvironment:
     def __init__(self):
         if os.path.isdir(WORKSPACE_BASE):
@@ -61,24 +80,28 @@ class CodeReviewEnvironment:
             step_count=0,
             current_task_index=0,
             total_reward=0.0,
-            done=False
+            done=False,
+            system_health="unknown",
+            progress_depth=0,
+            trap_count=0,
+            optimal_steps=0,
         )
         self.current_task_data = None
         self._is_first_reset = True
         self.workspace_dir = ""
-        # Tracks the highest pass rate reached this episode for delta-based rewards.
-        # Only updated on improvement — prevents reward farming by repeated patches.
         self.prev_pass_rate: float = 0.0
-        # Original test file contents keyed by relative path.
-        # Used by _enforce_test_integrity() to restore files after every
-        # execute_command — chmod 444 alone is bypassable via the shell.
         self._test_file_originals: Dict[str, str] = {}
-        # All file paths present at episode start (relative, forward-slash).
-        # Used to distinguish original repo files from agent-created ones.
         self._original_repo_files: set = set()
+        # Multi-component reward tracking
+        self._tool_types_used: Set[str] = set()
+        self._restart_count: int = 0
+        self._prev_health_at_restart: str = "unknown"
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Workspace management
+    # ─────────────────────────────────────────────────────────────────────────
 
     def _setup_workspace(self):
-        """Create a fresh isolated workspace for this episode."""
         if self.workspace_dir and os.path.exists(self.workspace_dir):
             shutil.rmtree(self.workspace_dir, ignore_errors=True)
 
@@ -88,10 +111,6 @@ class CodeReviewEnvironment:
         self._test_file_originals = {}
         self._original_repo_files = set()
 
-        # Support parametric tasks: factory(seed) returns {filepath: content}.
-        # Seed is derived from the episode UUID so each reset() gets a
-        # reproducible but unique problem instance — the LLM cannot memorise
-        # answers across episodes.
         _repo_factory = self.current_task_data.get("_repo_factory")
         if _repo_factory is not None:
             import hashlib as _hashlib
@@ -109,40 +128,23 @@ class CodeReviewEnvironment:
                 f.write(content)
             self._original_repo_files.add(filepath)
             if filepath.startswith("tests/"):
-                # Make read-only AND store original content.
-                # chmod 444 alone is bypassable via shell ('chmod +w …').
-                # _enforce_test_integrity() restores from this dict after
-                # every execute_command, closing that shell bypass.
                 os.chmod(full_path, 0o444)
                 self._test_file_originals[filepath] = content
 
     def cleanup(self):
-        """Explicitly remove the current workspace. Called on server shutdown."""
         if self.workspace_dir and os.path.exists(self.workspace_dir):
             shutil.rmtree(self.workspace_dir, ignore_errors=True)
 
     def _enforce_test_integrity(self) -> None:
-        """
-        Restore any test files modified or deleted by a shell command.
-
-        chmod 444 only prevents direct writes through open(); an agent using
-        execute_command can still run 'chmod +w tests/...' followed by an
-        echo redirect or a Python one-liner to overwrite the oracle.  This
-        method compares every test file against its original content and
-        rewrites + re-locks any that differ, closing that bypass completely.
-        Called unconditionally after every execute_command.
-        """
         for relpath, original in self._test_file_originals.items():
             full_path = os.path.join(self.workspace_dir, relpath)
             try:
                 with open(full_path, "r", encoding="utf-8") as f:
                     current = f.read()
                 if current == original:
-                    continue  # untouched — fast path
+                    continue
             except OSError:
-                current = None  # file was deleted
-
-            # Restore: briefly make writable, rewrite, re-lock
+                current = None
             try:
                 os.chmod(full_path, 0o644)
             except OSError:
@@ -152,9 +154,6 @@ class CodeReviewEnvironment:
                 f.write(original)
             os.chmod(full_path, 0o444)
 
-        # Remove extra files created under tests/ that were not present at
-        # episode start.  An agent can write tests/conftest.py via the shell
-        # to inject fixtures that make broken tests appear to pass.
         tests_dir = os.path.join(self.workspace_dir, "tests")
         if os.path.isdir(tests_dir):
             tracked_abs = {
@@ -170,11 +169,6 @@ class CodeReviewEnvironment:
                         except OSError:
                             pass
 
-        # Remove unauthorized pytest/Python control files at ANY level of the
-        # workspace tree.  An agent can create workspace-root conftest.py,
-        # pytest.ini, pyproject.toml, sitecustomize.py, etc. to override test
-        # collection globally and make broken tests appear to pass.
-        # This sweep is the authoritative close for that exploit vector.
         for dirpath, _, filenames in os.walk(self.workspace_dir):
             for fname in filenames:
                 if fname not in _PYTEST_CONTROL_NAMES:
@@ -187,106 +181,288 @@ class CodeReviewEnvironment:
                     except OSError:
                         pass
 
-    def reset(self, task_id: Optional[str] = None) -> CodeObservation:
-        """
-        Start a new episode.
+    # ─────────────────────────────────────────────────────────────────────────
+    # System health detection (for incident tasks 7-10)
+    # ─────────────────────────────────────────────────────────────────────────
 
-        Parameters
-        ----------
-        task_id : str, optional
-            Explicit task to load (e.g. "task_3_pr").  When provided the
-            internal round-robin counter is overridden.  When omitted the
-            environment cycles through tasks in order.
+    def _detect_system_health(self) -> str:
+        """Infer system health from workspace artifacts."""
+        task_id = self.state.task_id
+
+        if task_id in ("task_7_pr", "task_9_pr"):
+            state_path = os.path.join(self.workspace_dir, "service_state.json")
+            if os.path.isfile(state_path):
+                try:
+                    with open(state_path, encoding="utf-8") as f:
+                        st = json.load(f)
+                    return st.get("status", "unknown")
+                except Exception:
+                    return "unknown"
+            return "crashed"
+
+        if task_id == "task_8_pr":
+            db_path = os.path.join(self.workspace_dir, "app.db")
+            if not os.path.isfile(db_path):
+                return "crashed"
+            try:
+                import sqlite3
+                conn = sqlite3.connect(db_path)
+                cur = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND name NOT LIKE 'sqlite_%'"
+                )
+                tables = {r[0] for r in cur.fetchall()}
+                cur2 = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='index' "
+                    "AND name NOT LIKE 'sqlite_%'"
+                )
+                indexes = {r[0] for r in cur2.fetchall()}
+                conn.close()
+                if "users" in tables and "posts" in tables and len(indexes) >= 2:
+                    return "healthy"
+                if tables:
+                    return "degraded"
+                return "crashed"
+            except Exception:
+                return "unknown"
+
+        # For code tasks (1-6, 10): use pass rate as proxy
+        rate = self._get_test_pass_rate()
+        if rate >= 1.0:
+            return "healthy"
+        if rate > 0.5:
+            return "degraded"
+        return "crashed"
+
+    def _collect_structured_logs(self) -> Tuple[List[Dict[str, str]], Optional[Dict[str, Any]]]:
+        """Collect structured logs and service status from workspace artifacts."""
+        logs: List[Dict[str, str]] = []
+        service_status: Optional[Dict[str, Any]] = None
+
+        for fname in ("service.log", "migration.log", "app.log"):
+            fpath = os.path.join(self.workspace_dir, fname)
+            if os.path.isfile(fpath):
+                entries = _parse_log_file(fpath)
+                logs.extend(entries)
+
+        state_path = os.path.join(self.workspace_dir, "service_state.json")
+        if os.path.isfile(state_path):
+            try:
+                with open(state_path, encoding="utf-8") as f:
+                    service_status = json.load(f)
+            except Exception:
+                pass
+
+        db_path = os.path.join(self.workspace_dir, "app.db")
+        if os.path.isfile(db_path) and service_status is None:
+            try:
+                import sqlite3
+                conn = sqlite3.connect(db_path)
+                cur = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND name NOT LIKE 'sqlite_%'"
+                )
+                tables = sorted(r[0] for r in cur.fetchall())
+                cur2 = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='index' "
+                    "AND name NOT LIKE 'sqlite_%'"
+                )
+                indexes = sorted(r[0] for r in cur2.fetchall())
+                conn.close()
+                service_status = {
+                    "status": "healthy" if len(tables) >= 2 and len(indexes) >= 2 else "degraded",
+                    "tables": tables,
+                    "indexes": indexes,
+                }
+            except Exception:
+                pass
+
+        return logs[-50:], service_status
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Multi-component terminal reward
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _compute_submit_reward(
+        self, pytest_pass_rate: float, root_cause: str
+    ) -> Tuple[float, Dict[str, float]]:
         """
-        self.state.episode_id = str(uuid.uuid4())
-        self.state.step_count = 0
-        self.state.done = False
-        self.state.total_reward = 0.0
-        self.prev_pass_rate = 0.0
+        Five-component weighted terminal reward.
+
+        Components (weights sum to 1.0):
+          test_quality  0.40  — pytest pass rate [0, 1]
+          diagnosis     0.15  — keyword match of root_cause vs task keywords
+          efficiency    0.15  — optimal_steps / actual_steps (capped 1.0)
+          exploration   0.10  — unique action types used / 5 (capped 1.0)
+          trap_avoidance 0.10 — 1.0 - 0.2 * trap_count (floor 0)
+          submit_credit  0.10 — 1.0 always (reached submit vs max-steps timeout)
+
+        Gate: if tests don't all pass → cap at 0.49 (partial credit only).
+              if all tests pass → floor at 0.50.
+        Range: [0.01, 0.99]
+        """
+        # 1. Test quality
+        test_quality = float(pytest_pass_rate)
+
+        # 2. Diagnosis quality — keyword match
+        keywords: frozenset = self.current_task_data.get("_diagnosis_keywords", frozenset())
+        if keywords and root_cause:
+            rc_lower = root_cause.lower()
+            matched = sum(1 for kw in keywords if kw.lower() in rc_lower)
+            diagnosis = min(matched / max(len(keywords), 1), 1.0)
+        else:
+            diagnosis = 0.0
+
+        # 3. Efficiency — how close to optimal step count
+        optimal = self.current_task_data.get("_optimal_steps", 5)
+        actual  = max(self.state.step_count, 1)
+        if actual <= optimal:
+            efficiency = 1.0
+        elif actual <= optimal * 2:
+            efficiency = optimal / actual
+        else:
+            efficiency = max(0.1, optimal / actual)
+
+        # 4. Exploration — unique tool types used this episode
+        exploration = min(len(self._tool_types_used) / 5.0, 1.0)
+
+        # 5. Trap avoidance — decays per worsening/wasted restart
+        trap_avoidance = max(0.0, 1.0 - 0.20 * self.state.trap_count)
+
+        # 6. Submit credit — agent chose to submit (not timed out)
+        submit_credit = 1.0
+
+        weights = {
+            "test_quality":   0.40,
+            "diagnosis":      0.15,
+            "efficiency":     0.15,
+            "exploration":    0.10,
+            "trap_avoidance": 0.10,
+            "submit_credit":  0.10,
+        }
+        components = {
+            "test_quality":   test_quality,
+            "diagnosis":      diagnosis,
+            "efficiency":     efficiency,
+            "exploration":    exploration,
+            "trap_avoidance": trap_avoidance,
+            "submit_credit":  submit_credit,
+        }
+
+        raw = sum(weights[k] * components[k] for k in weights)
+
+        # Gate: full pass → floor 0.50; partial → cap 0.49
+        if test_quality >= 1.0:
+            raw = max(raw, 0.50)
+        else:
+            raw = min(raw, 0.01 + test_quality * 0.48)
+
+        reward = round(max(0.01, min(0.99, raw)), 4)
+
+        breakdown = {
+            k: round(weights[k] * components[k], 4) for k in weights
+        }
+        breakdown["raw_total"]   = round(raw, 4)
+        breakdown["test_quality_score"] = round(test_quality, 4)
+        breakdown["diagnosis_score"]    = round(diagnosis, 4)
+
+        return reward, breakdown
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Episode management
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def reset(self, task_id: Optional[str] = None) -> CodeObservation:
+        self.state.episode_id    = str(uuid.uuid4())
+        self.state.step_count    = 0
+        self.state.done          = False
+        self.state.total_reward  = 0.0
+        self.state.system_health = "unknown"
+        self.state.progress_depth = 0
+        self.state.trap_count    = 0
+        self.prev_pass_rate      = 0.0
+        self._tool_types_used    = set()
+        self._restart_count      = 0
+        self._prev_health_at_restart = "unknown"
 
         task_ids = [t["task_id"] for t in TASKS]
 
         if task_id is not None and task_id in task_ids:
-            # Caller requested a specific task — honour it exactly.
             self.state.current_task_index = task_ids.index(task_id)
         elif not self._is_first_reset:
-            # Default: advance round-robin.
-            self.state.current_task_index = (self.state.current_task_index + 1) % len(TASKS)
+            self.state.current_task_index = (
+                self.state.current_task_index + 1
+            ) % len(TASKS)
         self._is_first_reset = False
 
-        self.current_task_data = TASKS[self.state.current_task_index]
-        self.state.task_id = self.current_task_data["task_id"]
+        self.current_task_data   = TASKS[self.state.current_task_index]
+        self.state.task_id       = self.current_task_data["task_id"]
+        self.state.optimal_steps = self.current_task_data.get("_optimal_steps", 5)
 
         self._setup_workspace()
-
-        # _original_repo_files is populated by _setup_workspace for both
-        # static "repository" tasks and factory-pattern "_repo_factory" tasks.
         available_files = sorted(self._original_repo_files)
+
+        # Detect initial system health for incident tasks
+        self.state.system_health = self._detect_system_health()
+        logs, service_status = self._collect_structured_logs()
 
         return CodeObservation(
             task_id=self.state.task_id,
             context=self.current_task_data["description"],
             available_files=available_files,
-            action_result="Sandbox ready. Run 'pytest tests/' to see what is failing.",
+            action_result="Sandbox ready. Run 'run_tests' to see what is failing.",
             step_number=self.state.step_count,
             done=False,
-            reward=0.0
+            reward=0.0,
+            logs=logs,
+            service_status=service_status,
         )
 
     def _get_test_pass_rate(self) -> float:
-        """
-        Dispatch to the per-task grader and return pass rate [0.0, 1.0].
-
-        Uses the GRADERS dict from tasks.py so each task has an explicit,
-        named grader function — not a single shared anonymous pytest call.
-        The grader runs pytest internally with a clean minimal environment.
-        """
         grader = GRADERS.get(self.state.task_id)
         if grader is None:
             return 0.0
         return grader(self.workspace_dir)
 
-    def step(self, action_obj: AgentAction) -> Tuple[CodeObservation, float, bool, Dict[str, Any]]:
-        # Guard: /reset must be called before the first /step
+    # ─────────────────────────────────────────────────────────────────────────
+    # Step dispatch
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def step(
+        self, action_obj: AgentAction
+    ) -> Tuple[CodeObservation, float, bool, Dict[str, Any]]:
+
         if self.current_task_data is None:
             obs = CodeObservation(
-                task_id="none",
-                context="No active episode.",
-                available_files=[],
-                action_result="Call POST /reset before calling /step.",
-                step_number=0,
-                done=False,
-                reward=0.0
+                task_id="none", context="No active episode.",
+                available_files=[], action_result="Call POST /reset before /step.",
+                step_number=0, done=False, reward=0.0,
             )
             return obs, 0.0, False, {"error": "no_active_episode_call_reset_first"}
 
-        # If episode already ended, return a clean terminal observation.
         if self.state.done:
             obs = CodeObservation(
                 task_id=self.state.task_id,
-                context=self.current_task_data["description"] if self.current_task_data else "",
+                context=self.current_task_data["description"],
                 available_files=sorted(self._original_repo_files),
                 action_result="Episode is already done. Call /reset to start a new episode.",
-                step_number=self.state.step_count,
-                done=True,
-                reward=0.0
+                step_number=self.state.step_count, done=True, reward=0.0,
             )
             return obs, 0.0, True, {"error": "episode_already_done"}
 
         try:
             self.state.step_count += 1
             available_files = sorted(self._original_repo_files)
-
             obs_result = ""
             reward = 0.0
             done = False
-            info = {}
-
+            info: Dict[str, Any] = {}
             env = _make_clean_env(self.workspace_dir)
 
-            # ----------------------------------------------------------------
-            # TOOL 1: EXECUTE COMMAND
-            # ----------------------------------------------------------------
+            # Track tool diversity for exploration score
+            self._tool_types_used.add(action_obj.action_type)
+
+            # ── TOOL: execute_command ─────────────────────────────────────────
             if action_obj.action_type == "execute_command":
                 cmd = action_obj.command
                 if not cmd:
@@ -307,115 +483,14 @@ class CodeReviewEnvironment:
                                 f"showing last {MAX_OUTPUT_CHARS}]...\n"
                                 + output[-MAX_OUTPUT_CHARS:]
                             )
-                        obs_result = f"--- BASH OUTPUT (Exit Code {result.returncode}) ---\n{output}"
-                        # Successful commands (exit 0) give a small exploration signal.
-                        # Failed commands (non-zero exit) give a smaller signal —
-                        # this differentiates useful exploration from wasted steps.
+                        obs_result = f"--- BASH OUTPUT (Exit {result.returncode}) ---\n{output}"
                         reward = 0.01 if result.returncode == 0 else 0.005
                     except TimeoutExpired:
-                        obs_result = "Error: Command timed out after 15 seconds. Avoid long-running or interactive commands."
-                        reward = 0.005  # timeout is a wasted step
-
-                # Restore any test files the shell may have tampered with.
-                # chmod 444 alone is bypassable via 'chmod +w'; this closes it.
+                        obs_result = "Error: Command timed out after 15 seconds."
+                        reward = 0.005
                 self._enforce_test_integrity()
 
-            # ----------------------------------------------------------------
-            # TOOL 2: PATCH FILE — Delta-based dense reward
-            # ----------------------------------------------------------------
-            elif action_obj.action_type == "patch_file":
-                target = action_obj.target_file
-                new_content = action_obj.new_content
-                if not target or not new_content:
-                    obs_result = "Error: target_file and new_content are required."
-                    reward = 0.0
-                else:
-                    workspace_real = os.path.realpath(self.workspace_dir)
-                    full_path = os.path.realpath(
-                        os.path.join(self.workspace_dir, target)
-                    )
-                    tests_real = os.path.realpath(
-                        os.path.join(self.workspace_dir, "tests")
-                    )
-
-                    if not full_path.startswith(workspace_real + os.sep):
-                        obs_result = "Security Error: Path traversal detected and blocked."
-                        # Explicit penalty — destructive intent, not neutral exploration.
-                        reward = -0.05
-
-                    elif full_path.startswith(tests_real + os.sep) or full_path == tests_real:
-                        obs_result = "Security Error: Test files are read-only and cannot be modified by the agent."
-                        # Explicit penalty — attempt to tamper with the oracle.
-                        reward = -0.05
-
-                    else:
-                        # Block unauthorized pytest control files before any
-                        # write.  Without this check an agent can create
-                        # workspace-root conftest.py via patch_file (the
-                        # shell-side bypass is caught by _enforce_test_integrity
-                        # but patch_file bypasses that sweep entirely).
-                        _ctrl_rel = os.path.relpath(
-                            full_path, workspace_real
-                        ).replace(os.sep, "/")
-                        if (os.path.basename(full_path) in _PYTEST_CONTROL_NAMES
-                                and _ctrl_rel not in self._original_repo_files):
-                            obs_result = (
-                                "Security Error: Creating pytest configuration files "
-                                "(conftest.py, pytest.ini, pyproject.toml, etc.) is not allowed."
-                            )
-                            reward = -0.05
-                            full_path = None
-
-                        if full_path is not None:
-                            os.makedirs(os.path.dirname(full_path), exist_ok=True)
-                        import py_compile, tempfile
-                        if full_path is not None and full_path.endswith(".py"):
-                            try:
-                                with tempfile.NamedTemporaryFile(
-                                    mode="w", suffix=".py", delete=False,
-                                    encoding="utf-8"
-                                ) as tmp:
-                                    tmp.write(new_content)
-                                    tmp_path = tmp.name
-                                py_compile.compile(tmp_path, doraise=True)
-                                os.unlink(tmp_path)
-                            except py_compile.PyCompileError as e:
-                                os.unlink(tmp_path)
-                                obs_result = f"Syntax Error in patch: {e}. File was NOT written. Fix the syntax and try again."
-                                reward = 0.005  # syntax error — wasted step, slight penalty
-                                full_path = None
-
-                        if full_path is not None and not obs_result:
-                            with open(full_path, "w", encoding="utf-8") as f:
-                                f.write(new_content)
-                            obs_result = f"Successfully patched: {target}"
-
-                            # Delta-based reward: only reward genuine test improvements.
-                            # raw  = current pass rate after this patch.
-                            # delta = improvement over the best pass rate so far.
-                            # If the agent re-patches with no new test gains, reward is
-                            # near-zero — no farming possible.
-                            raw = self._get_test_pass_rate()
-                            delta = round(raw - self.prev_pass_rate, 4)
-
-                            if delta > 0:
-                                # Genuine progress: reward proportional to improvement.
-                                # Range: (0.01, 0.89] — capped below 1.0 to force submit.
-                                reward = round(0.01 + delta * 0.88, 4)
-                                self.prev_pass_rate = raw   # advance the baseline
-                            else:
-                                # No improvement (stall or regression) — minimal signal.
-                                reward = 0.005
-
-                            # Expose actual pass rate for accurate breakdown metadata.
-                            info["test_pass_rate"] = round(raw, 4)
-                            self.state.total_reward = round(
-                                max(self.state.total_reward, reward), 4
-                            )
-
-            # ----------------------------------------------------------------
-            # TOOL 2b: READ FILE — Clean file reader (no shell required)
-            # ----------------------------------------------------------------
+            # ── TOOL: read_file ───────────────────────────────────────────────
             elif action_obj.action_type == "read_file":
                 path = action_obj.path
                 if not path:
@@ -440,7 +515,8 @@ class CodeReviewEnvironment:
                             if len(content) > MAX_CHARS:
                                 content = (
                                     content[:MAX_CHARS]
-                                    + f"\n...[TRUNCATED — {len(content)} total chars, showing first {MAX_CHARS}]..."
+                                    + f"\n...[TRUNCATED — showing first {MAX_CHARS} of "
+                                    f"{len(content)} chars]..."
                                 )
                             obs_result = f"--- {path} ---\n{content}"
                             reward = 0.01
@@ -448,9 +524,7 @@ class CodeReviewEnvironment:
                             obs_result = f"Error reading {path}: {e}"
                             reward = 0.005
 
-            # ----------------------------------------------------------------
-            # TOOL 2c: SEARCH CODEBASE — Grep with regex across .py files
-            # ----------------------------------------------------------------
+            # ── TOOL: search_codebase ─────────────────────────────────────────
             elif action_obj.action_type == "search_codebase":
                 pattern = action_obj.pattern
                 if not pattern:
@@ -466,19 +540,17 @@ class CodeReviewEnvironment:
                         output = (result.stdout or result.stderr or "").strip()
                         MAX_CHARS = 3000
                         if len(output) > MAX_CHARS:
-                            output = output[:MAX_CHARS] + f"\n...[TRUNCATED]..."
+                            output = output[:MAX_CHARS] + "\n...[TRUNCATED]..."
                         obs_result = (
                             f"--- search: {pattern!r} ---\n{output}"
-                            if output else f"No matches for pattern: {pattern!r}"
+                            if output else f"No matches for: {pattern!r}"
                         )
                         reward = 0.01
                     except TimeoutExpired:
                         obs_result = "Error: search timed out."
                         reward = 0.005
 
-            # ----------------------------------------------------------------
-            # TOOL 2d: RUN TESTS — Targeted pytest (optional path)
-            # ----------------------------------------------------------------
+            # ── TOOL: run_tests ───────────────────────────────────────────────
             elif action_obj.action_type == "run_tests":
                 test_path = action_obj.path or "tests/"
                 try:
@@ -492,8 +564,7 @@ class CodeReviewEnvironment:
                     MAX_OUTPUT_CHARS = 4000
                     if len(output) > MAX_OUTPUT_CHARS:
                         output = (
-                            f"...[TRUNCATED — {len(output)} chars, "
-                            f"showing last {MAX_OUTPUT_CHARS}]...\n"
+                            f"...[TRUNCATED — showing last {MAX_OUTPUT_CHARS}]...\n"
                             + output[-MAX_OUTPUT_CHARS:]
                         )
                     obs_result = f"--- pytest {test_path} (Exit {result.returncode}) ---\n{output}"
@@ -501,12 +572,9 @@ class CodeReviewEnvironment:
                 except TimeoutExpired:
                     obs_result = "Error: pytest timed out after 20 seconds."
                     reward = 0.005
-
                 self._enforce_test_integrity()
 
-            # ----------------------------------------------------------------
-            # TOOL 2e: INSPECT LOGS — Read service/migration log files
-            # ----------------------------------------------------------------
+            # ── TOOL: inspect_logs ────────────────────────────────────────────
             elif action_obj.action_type == "inspect_logs":
                 log_names = ["service.log", "migration.log", "app.log"]
                 found = []
@@ -517,7 +585,7 @@ class CodeReviewEnvironment:
 
                 if not found:
                     obs_result = (
-                        "No log files found yet. Log files are generated after service operations. "
+                        "No log files found yet. Logs are generated after service operations. "
                         "Call restart_service to run app_init.py and produce logs."
                     )
                     reward = 0.005
@@ -535,18 +603,98 @@ class CodeReviewEnvironment:
                     obs_result = "\n\n".join(parts)
                     reward = 0.01
 
-            # ----------------------------------------------------------------
-            # TOOL 2f: RESTART SERVICE — Run app_init.py, update state JSON
-            # ----------------------------------------------------------------
+            # ── TOOL: patch_file ──────────────────────────────────────────────
+            elif action_obj.action_type == "patch_file":
+                target = action_obj.target_file
+                new_content = action_obj.new_content
+                if not target or not new_content:
+                    obs_result = "Error: target_file and new_content are required."
+                    reward = 0.0
+                else:
+                    workspace_real = os.path.realpath(self.workspace_dir)
+                    full_path = os.path.realpath(
+                        os.path.join(self.workspace_dir, target)
+                    )
+                    tests_real = os.path.realpath(
+                        os.path.join(self.workspace_dir, "tests")
+                    )
+
+                    if not full_path.startswith(workspace_real + os.sep):
+                        obs_result = "Security Error: Path traversal detected and blocked."
+                        reward = -0.05
+                        self.state.trap_count += 1
+
+                    elif full_path.startswith(tests_real + os.sep) or full_path == tests_real:
+                        obs_result = "Security Error: Test files are read-only and cannot be modified."
+                        reward = -0.05
+                        self.state.trap_count += 1
+
+                    else:
+                        _ctrl_rel = os.path.relpath(
+                            full_path, workspace_real
+                        ).replace(os.sep, "/")
+                        if (os.path.basename(full_path) in _PYTEST_CONTROL_NAMES
+                                and _ctrl_rel not in self._original_repo_files):
+                            obs_result = (
+                                "Security Error: Creating pytest configuration files "
+                                "(conftest.py, pytest.ini, pyproject.toml, etc.) is not allowed."
+                            )
+                            reward = -0.05
+                            self.state.trap_count += 1
+                            full_path = None
+
+                        if full_path is not None:
+                            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+                        import py_compile, tempfile
+                        if full_path is not None and full_path.endswith(".py"):
+                            try:
+                                with tempfile.NamedTemporaryFile(
+                                    mode="w", suffix=".py", delete=False, encoding="utf-8"
+                                ) as tmp:
+                                    tmp.write(new_content)
+                                    tmp_path = tmp.name
+                                py_compile.compile(tmp_path, doraise=True)
+                                os.unlink(tmp_path)
+                            except py_compile.PyCompileError as e:
+                                os.unlink(tmp_path)
+                                obs_result = (
+                                    f"Syntax Error in patch: {e}. "
+                                    "File was NOT written. Fix the syntax and try again."
+                                )
+                                reward = 0.005
+                                full_path = None
+
+                        if full_path is not None and not obs_result:
+                            with open(full_path, "w", encoding="utf-8") as f:
+                                f.write(new_content)
+                            obs_result = f"Successfully patched: {target}"
+
+                            raw = self._get_test_pass_rate()
+                            delta = round(raw - self.prev_pass_rate, 4)
+
+                            if delta > 0:
+                                reward = round(0.01 + delta * 0.88, 4)
+                                self.prev_pass_rate = raw
+                            else:
+                                reward = 0.005
+
+                            info["test_pass_rate"] = round(raw, 4)
+                            self.state.total_reward = round(
+                                max(self.state.total_reward, reward), 4
+                            )
+
+            # ── TOOL: restart_service ─────────────────────────────────────────
             elif action_obj.action_type == "restart_service":
                 app_init_path = os.path.join(self.workspace_dir, "app_init.py")
                 if not os.path.isfile(app_init_path):
                     obs_result = (
                         "Error: app_init.py not found in workspace root. "
-                        "This action only applies to tasks with a service or database component."
+                        "This action only applies to service/database tasks (7-9)."
                     )
                     reward = 0.005
                 else:
+                    prev_health = self._detect_system_health()
+
                     try:
                         result = subprocess.run(
                             "python app_init.py",
@@ -558,88 +706,86 @@ class CodeReviewEnvironment:
                         MAX_CHARS = 2000
                         if len(output) > MAX_CHARS:
                             output = output[-MAX_CHARS:]
+
+                        new_health = self._detect_system_health()
+                        self.state.system_health = new_health
+
+                        # Emit structured log entry for this restart attempt
+                        ts_now = __import__("datetime").datetime.utcnow().isoformat() + "Z"
+                        info["restart_outcome"] = new_health
+                        info["prev_health"]     = prev_health
+
+                        if new_health in ("running", "healthy") and prev_health not in ("running", "healthy"):
+                            # Genuine progress: system improved
+                            self.state.progress_depth += 1
+                            reward = 0.05  # larger signal for real progress
+                            outcome_label = "progress"
+                        elif new_health == prev_health and self._restart_count > 0:
+                            # Same state after another restart = trap (wasted step)
+                            self.state.trap_count += 1
+                            reward = 0.005
+                            outcome_label = "no_effect"
+                        elif new_health in ("crashed", "oom_killed") and self._restart_count > 0:
+                            # Explicitly worsened or still broken
+                            self.state.trap_count += 1
+                            reward = 0.005
+                            outcome_label = "worsened"
+                        else:
+                            reward = 0.01
+                            outcome_label = "progress" if result.returncode == 0 else "no_effect"
+
+                        info["outcome"] = outcome_label
                         obs_result = (
-                            f"Service restart {'succeeded' if result.returncode == 0 else 'failed'} "
+                            f"[restart_service] outcome={outcome_label} "
+                            f"health={prev_health}→{new_health} "
                             f"(exit {result.returncode}):\n{output}"
                         )
-                        reward = 0.01 if result.returncode == 0 else 0.005
+
                     except TimeoutExpired:
                         obs_result = "Error: app_init.py timed out after 15 seconds."
                         reward = 0.005
 
+                    self._restart_count += 1
                 self._enforce_test_integrity()
 
-            # ----------------------------------------------------------------
-            # TOOL 3: SUBMIT REVIEW — Final execution grader
-            # ----------------------------------------------------------------
-            elif action_obj.action_type == "submit_review":
+            # ── TOOL: submit_fix (primary terminal) ───────────────────────────
+            elif action_obj.action_type in ("submit_fix", "submit_review"):
+                root_cause = action_obj.root_cause or action_obj.summary or ""
                 try:
                     result = subprocess.run(
                         "pytest tests/ -v",
                         cwd=self.workspace_dir, shell=True,
-                        capture_output=True, text=True, timeout=15, env=env
+                        capture_output=True, text=True, timeout=15, env=env,
                     )
                     if result.returncode == 0:
-                        reward = 0.99
-                        feedback = "SUCCESS: All tests passed."
-                        info["test_pass_rate"] = 1.0
+                        raw_pass_rate = 1.0
+                        pytest_feedback = "SUCCESS: All tests passed."
                     else:
-                        raw = self._get_test_pass_rate()
-                        # Map to (0.01, 0.98) — open interval
-                        reward = round(0.01 + raw * 0.97, 4)
-                        feedback = f"FAILED: Tests still failing.\n{result.stdout[-500:]}"
-                        info["test_pass_rate"] = round(raw, 4)
+                        raw_pass_rate = self._get_test_pass_rate()
+                        pytest_feedback = f"FAILED: Tests still failing.\n{result.stdout[-500:]}"
+                    info["test_pass_rate"] = round(raw_pass_rate, 4)
                 except TimeoutExpired:
-                    reward = 0.01
-                    feedback = "FAILED: Test suite timed out."
+                    raw_pass_rate = 0.0
+                    pytest_feedback = "FAILED: Test suite timed out."
                     info["test_pass_rate"] = 0.0
 
-                obs_result = f"Evaluation complete. {feedback}"
+                reward, breakdown = self._compute_submit_reward(raw_pass_rate, root_cause)
+                obs_result = f"Evaluation complete. {pytest_feedback}"
                 done = True
                 self.state.total_reward = max(self.state.total_reward, reward)
-                info["feedback"] = feedback
-                shutil.rmtree(self.workspace_dir, ignore_errors=True)
-
-            # ----------------------------------------------------------------
-            # TOOL 4: SUBMIT FIX — Preferred terminal with root-cause analysis
-            # (identical grading logic to submit_review; records root_cause)
-            # ----------------------------------------------------------------
-            elif action_obj.action_type == "submit_fix":
-                root_cause = action_obj.root_cause or action_obj.summary or "(no root cause provided)"
-                try:
-                    result = subprocess.run(
-                        "pytest tests/ -v",
-                        cwd=self.workspace_dir, shell=True,
-                        capture_output=True, text=True, timeout=15, env=env
-                    )
-                    if result.returncode == 0:
-                        reward = 0.99
-                        feedback = f"SUCCESS: All tests passed."
-                        info["test_pass_rate"] = 1.0
-                    else:
-                        raw = self._get_test_pass_rate()
-                        reward = round(0.01 + raw * 0.97, 4)
-                        feedback = f"FAILED: Tests still failing.\n{result.stdout[-500:]}"
-                        info["test_pass_rate"] = round(raw, 4)
-                except TimeoutExpired:
-                    reward = 0.01
-                    feedback = "FAILED: Test suite timed out."
-                    info["test_pass_rate"] = 0.0
-
-                obs_result = f"Evaluation complete. {feedback}"
-                done = True
-                self.state.total_reward = max(self.state.total_reward, reward)
-                info["feedback"] = feedback
+                info["feedback"]   = pytest_feedback
                 info["root_cause"] = root_cause
+                info["reward_breakdown"] = breakdown
                 shutil.rmtree(self.workspace_dir, ignore_errors=True)
 
-            # Server-side max_steps cutoff
+            # ── Max steps cutoff ──────────────────────────────────────────────
             if self.state.step_count >= MAX_STEPS and not done:
                 done = True
-                obs_result += f"\n[System] Max steps ({MAX_STEPS}) reached. Episode terminated."
+                obs_result += f"\n[System] Max steps ({MAX_STEPS}) reached — episode terminated."
                 shutil.rmtree(self.workspace_dir, ignore_errors=True)
 
             self.state.done = done
+            logs, service_status = self._collect_structured_logs() if not done else ([], None)
 
             obs = CodeObservation(
                 task_id=self.state.task_id,
@@ -648,15 +794,14 @@ class CodeReviewEnvironment:
                 action_result=obs_result,
                 step_number=self.state.step_count,
                 done=done,
-                reward=reward
+                reward=reward,
+                logs=logs,
+                service_status=service_status,
             )
             return obs, reward, done, info
 
         except Exception as e:
             current_done = self.state.done
-            if self.workspace_dir and os.path.exists(self.workspace_dir):
-                if current_done:
-                    shutil.rmtree(self.workspace_dir, ignore_errors=True)
             obs = CodeObservation(
                 task_id=self.state.task_id if self.current_task_data else "error",
                 context="Error state",
@@ -664,6 +809,6 @@ class CodeReviewEnvironment:
                 action_result=f"Internal Error: {str(e)}",
                 step_number=self.state.step_count,
                 done=current_done,
-                reward=0.0
+                reward=0.0,
             )
             return obs, 0.0, current_done, {"error": str(e)}

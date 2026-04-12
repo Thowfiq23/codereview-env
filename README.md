@@ -381,7 +381,8 @@ All tasks use **parametric factories** — each episode reset generates a fresh 
 [STEP] step=7 action={"action_type":"submit_review","summary":"Fixed quantity multiplication and discount percentage."} reward=0.99 done=true error=null
 [END] success=true steps=7 rewards=0.01,0.01,0.01,0.45,0.89,0.01,0.99
 
-[SUMMARY] tasks=6 scores=0.99,0.99,0.99,... average=0.99
+[SUMMARY] tasks=5 scores=0.99,0.99,0.99,0.99,0.99 average=0.99
+# task_6_pr omitted — see note below
 ```
 
 > Note: The dense trajectory is the key output for RL training. Step 5 of task_3 shows the grader
@@ -389,7 +390,13 @@ All tasks use **parametric factories** — each episode reset generates a fresh 
 > returning `reward=0.01` (floor). The agent self-corrects on step 6 and earns `0.89`. This demonstrates
 > that the grader enforces semantic correctness, not just syntactic validity.
 
-**task_6_pr is not represented in the trajectory above — it requires a qualitatively different strategy.** A greedy agent that patches `scorer.py` first will see `test_rank_best_match_first` regress (a previously-passing test starts failing). Standard read-patch-run-submit loops stall or exhaust MAX_STEPS without reaching full score. A strong agent must recognize the regression, diagnose the coupling, and patch both `scorer.py` and `ranker.py` before rerunning pytest. This task was deliberately designed so that the 0.99 baseline above does not extend to it.
+**task_6_pr baseline — the trap in the reward curve:**
+
+The above 0.99 sweep covers tasks 1–5 only. task_6_pr behaves differently:
+
+A greedy agent that reads `scorer.py`, fixes Bug 2 (wrong denominator), and runs pytest will see `test_rank_best_match_first` **regress** — a previously-passing test now fails. The pass rate drops from 5/7 → 5/7 (same count, different tests), so the delta reward is near-zero or negative on that step.
+
+Concretely: patching `scorer.py` alone yields `test_pass_rate ≈ 0.71` (5 of 7); patching only `ranker.py` alone yields `test_pass_rate ≈ 0.57` (4 of 7); only fixing both together reaches `0.86` (6 of 7), and all three files together reach `1.0`. A standard read-one-file → patch-one-file → pytest loop will either stall at 0.71 or exhaust MAX_STEPS without reaching submit. The agent needs to hold the regression in working memory and reason that two files must be patched in the same step.
 
 ---
 

@@ -10,9 +10,13 @@ from typing import Dict, Any, Tuple, Optional
 from models import AgentAction, CodeObservation, ReviewState
 from tasks import TASKS, GRADERS
 
-# Configurable via env var — defaults to /tmp for Linux containers.
-# Set WORKSPACE_BASE to a writable path on non-Linux hosts.
-WORKSPACE_BASE = os.getenv("WORKSPACE_BASE", "/tmp/codereview_workspaces")
+# Configurable via env var.  Falls back to the platform temp directory so the
+# default works on Windows, macOS, and Linux without manual configuration.
+import tempfile as _tempfile
+WORKSPACE_BASE = os.getenv(
+    "WORKSPACE_BASE",
+    os.path.join(_tempfile.gettempdir(), "codereview_workspaces"),
+)
 
 MAX_STEPS = 10
 

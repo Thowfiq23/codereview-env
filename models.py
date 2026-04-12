@@ -55,7 +55,7 @@ class ReviewState(BaseModel):
     episode_id:          str   = Field(..., description="UUID of the current episode")
     task_id:             str   = Field(..., description="Task currently active")
     step_count:          int   = Field(..., description="Steps taken in this episode")
-    current_task_index:  int   = Field(..., description="Index into the TASKS list (cycles 0→1→2→0)")
+    current_task_index:  int   = Field(..., description="Index into the TASKS list (cycles 0→1→…→5→0)")
     total_reward:        float = Field(0.0, description="Highest reward achieved so far this episode")
     done:                bool  = Field(..., description="True when the episode has ended")
 

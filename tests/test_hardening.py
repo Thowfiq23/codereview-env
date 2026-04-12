@@ -9,12 +9,19 @@ Run from repo root:
 """
 import os
 import sys
+import tempfile
 import pytest
 
 # Ensure server package and root are importable regardless of cwd
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
 sys.path.insert(0, os.path.join(_ROOT, "server"))
+
+# Point WORKSPACE_BASE at the platform temp dir before importing environment
+# so the default /tmp/codereview_workspaces path is not assumed.  This makes
+# the hardening tests pass on Windows and any host where /tmp is not writable.
+if "WORKSPACE_BASE" not in os.environ:
+    os.environ["WORKSPACE_BASE"] = os.path.join(tempfile.gettempdir(), "codereview_workspaces")
 
 from server.environment import CodeReviewEnvironment
 from models import AgentAction

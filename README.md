@@ -174,7 +174,7 @@ Every `reset()` and `step()` returns a `CodeObservation`:
 
 ```python
 class CodeObservation(BaseModel):
-    task_id:         str        # "task_1_pr" | "task_2_pr" | "task_3_pr"
+    task_id:         str        # "task_1_pr" | "task_2_pr" | "task_3_pr" | "task_4_pr" | "task_5_pr"
     context:         str        # Full PR description — the agent's briefing
     available_files: List[str]  # Files present at episode start
     action_result:   str        # stdout/stderr of last command, or status message
@@ -219,76 +219,89 @@ The reward is **dense by design** — every `patch_file` produces a signal propo
 
 ## Tasks
 
-### Task 1 — `task_1_pr` — Security Audit — Easy
+### Task 1 — `task_1_pr` — User Registration — Medium
 
-**Scenario:** *PR #42 "Add user authentication"* — CI/CD security scanner is blocking the merge due to two critical vulnerabilities introduced in the new auth module.
+**Scenario:** *PR #42 "Add user registration"* — CI is red: email validation passes garbage addresses, passwords one character too short are accepted, and passwords are stored as MD5 hashes.
 
 | File | Bug | Correct Fix |
 |------|-----|-------------|
-| `auth/models.py` | `get_user_query` builds SQL via f-string: `f"SELECT * FROM users WHERE username = '{username}'"` — classic SQL injection | Return a parameterized query: `('SELECT * FROM users WHERE username = %s', (username,))` |
-| `auth/crypto.py` | `hash_password` uses `hashlib.md5` — cryptographically broken since 2004 | Replace with SHA-256, bcrypt, or PBKDF2 |
+| `auth/register.py` | Email regex uses `*` (zero-or-more) instead of `+` (one-or-more) for local part | Change `*` → `+` |
+| `auth/register.py` | Password length check is `len(password) > 8` (rejects 8-char passwords) | Change `>` → `>=` |
+| `auth/register.py` | `hashlib.md5` used for password storage | Replace with `hashlib.sha256` |
 
-**Grader:** Tests check structural properties (parameterized tuple returned, `md5` not present in hash function) — not runtime values. The agent must understand what a secure pattern looks like, not just copy a string.
-
-**Baseline (Llama-3.3-70B, temp=0.0):** Solved in **7 steps**, score **0.99**
-Reward trajectory: `0.01 → 0.01 → 0.45 → 0.01 → 0.89 → 0.01 → 0.99`
+**Parametric:** Each episode randomises the email/password test cases from a pool, so the agent cannot memorise expected values — it must fix the algorithm.
 
 ---
 
-### Task 2 — `task_2_pr` — Logic Bug — Medium
+### Task 2 — `task_2_pr` — Order Pricing — Medium-Hard
 
-**Scenario:** *PR #88 "Implement shopping cart billing"* — QA reports checkout totals are wrong. A cart with two $10 items and one $20 item should total $32 after a 20% discount; the code returns $8.
+**Scenario:** *PR #88 "Order pricing engine"* — QA reports totals are wrong: quantity isn't multiplied, discounts inflate instead of reduce the price, and tax is added flat instead of compounded.
 
 | File | Bug | Correct Fix |
 |------|-----|-------------|
-| `billing/cart.py` | `calculate_total` sums `item['price']` ignoring `item['quantity']` — off by a factor of quantity | Multiply: `item['price'] * item['quantity']` |
-| `billing/discounts.py` | `apply_discount` returns `amount * 0.20` — charges 20% of price instead of keeping 80% | Return `amount * 0.80` |
+| `orders/pricing.py` | Sums `item.price` without multiplying by `item.quantity` | `item.price * item.quantity` |
+| `orders/pricing.py` | Discount applied as `total + discount_amount` (increases price) | `total - discount_amount` |
+| `orders/pricing.py` | Tax applied additively: `total + tax_rate * subtotal` instead of multiplicatively | `total * (1 + tax_rate)` |
 
-**Grader:** Tests run the buggy function with known inputs and assert exact numeric output. The agent cannot guess — it must trace the arithmetic.
-
-**Baseline (Llama-3.3-70B, temp=0.0):** Solved in **7 steps**, score **0.99**
-Reward trajectory: `0.01 → 0.01 → 0.01 → 0.45 → 0.89 → 0.01 → 0.99`
+**Parametric:** Prices, quantities, discount %, and tax rate are randomised each episode. Expected totals are derived from the correct formula — the agent must fix the arithmetic, not hardcode values.
 
 ---
 
-### Task 3 — `task_3_pr` — Security + Async Performance — Hard
+### Task 3 — `task_3_pr` — Async Payment Processor — Hard
 
-**Scenario:** *PR #105 "Integrate Stripe payment processor"* — deployment is blocked by two independent issues: a secrets scanner flagging a hardcoded API key, and a performance regression that blocks the async event loop.
+**Scenario:** *PR #105 "Stripe integration"* — deployment blocked: secrets scanner flags a hardcoded live key, the async handler blocks the event loop, and the retry loop runs one extra attempt.
 
 | File | Bug | Correct Fix |
 |------|-----|-------------|
-| `payments/config.py` | `STRIPE_LIVE_KEY = 'sk_live_9876543210qwerty'` hardcoded | Move to `os.getenv('STRIPE_LIVE_KEY')` |
-| `payments/processor.py` | `time.sleep(5)` called synchronously inside a payment handler — blocks the entire event loop under async load | Declare `async def process_payment` and replace with `await asyncio.sleep(5)` |
+| `payments/processor.py` | `STRIPE_KEY = 'sk_live_...'` hardcoded | `os.getenv('STRIPE_KEY')` |
+| `payments/processor.py` | `def process_payment` (sync) calls `time.sleep` — blocks event loop | `async def` + `await asyncio.sleep` |
+| `payments/processor.py` | `range(max_retries + 1)` produces one extra attempt | `range(max_retries)` |
 
-**Why this is hard:** These two bugs require completely different domain knowledge — secrets management and Python's async/await model — applied simultaneously. The grader for the performance bug uses **AST analysis** (not string matching) to verify that `process_payment` is declared as `async def` and contains an `await` expression. A comment saying `# async def` or a docstring trick will not pass.
+**Grader:** The async fix is verified via AST analysis — `process_payment` must be an `AsyncFunctionDef` containing an `Await` node. String tricks won't pass. `max_retries` is randomised each episode.
 
-**Grader details:**
-```python
-# Confirms process_payment is truly async — string matching is not sufficient
-async_funcs = [n for n in ast.walk(tree)
-               if isinstance(n, ast.AsyncFunctionDef) and n.name == 'process_payment']
-has_await = any(isinstance(n, ast.Await) for n in ast.walk(async_funcs[0]))
-```
+---
 
-**Baseline (Llama-3.3-70B, temp=0.0):** Solved in **8 steps**, score **0.99**
-Reward trajectory: `0.01 → 0.01 → 0.45 → 0.01 → 0.01 → 0.89 → 0.01 → 0.99`
-*(Step 5 patches processor.py as `def` — grader returns floor 0.01. Step 6 corrects to `async def` + `await`.)*
+### Task 4 — `task_4_pr` — LRU Cache — Hard
+
+**Scenario:** *PR #201 "Add LRU cache layer"* — cache evicts the wrong entry and crashes on deserialising `None` values.
+
+| File | Bug | Correct Fix |
+|------|-----|-------------|
+| `cache/store.py` | `get()` reads the value but never calls `move_to_end()` — LRU order not maintained | Call `self._store.move_to_end(key)` after the read |
+| `cache/store.py` | `put()` evicts an entry but the `popitem` is missing — cache grows without bound | `self._store.popitem(last=False)` when `len > capacity` |
+| `cache/serializer.py` | `deserialize(None)` raises `TypeError` instead of returning `None` | Guard with `if data is None: return None` |
+
+**Parametric:** Cache capacity and key names are randomised each episode.
+
+---
+
+### Task 5 — `task_5_pr` — Analytics Pipeline — Very Hard
+
+**Scenario:** *PR #317 "Analytics pipeline"* — three independent algorithmic bugs: EMA weights swapped, anomaly detector uses biased population std causing false positives, and sliding window drops the last window.
+
+| File | Bug | Correct Fix |
+|------|-----|-------------|
+| `analytics/aggregator.py` | `ema = alpha * prev + (1-alpha) * new_value` — weights swapped | `alpha * new_value + (1-alpha) * prev` |
+| `analytics/detector.py` | `variance / len(values)` — population std (ddof=0) gives false positives | Divide by `len(values) - 1` (sample std, ddof=1) |
+| `analytics/window.py` | `range(n - size)` — off-by-one drops last window | `range(n - size + 1)` |
+
+**Why this is very hard:** All three bugs are subtle algorithmic errors. The EMA swap looks plausible, the std denominator difference only manifests on small datasets, and the range boundary is a classic off-by-one. All test values are computed from the correct formula using a random seed — the agent must understand the mathematics, not pattern-match against known outputs.
 
 ---
 
 ## Difficulty Progression
 
-| Task | Domain | Bugs | Steps | Trajectory | Score |
-|------|--------|------|-------|------------|-------|
-| `task_1_pr` | Security | 2 | 7 | `0.01→0.45→0.89→0.99` | **0.99** |
-| `task_2_pr` | Arithmetic Logic | 2 | 7 | `0.01→0.45→0.89→0.99` | **0.99** |
-| `task_3_pr` | Security + Async | 2 | 8 (+1 failed patch) | `0.01→0.45→0.01→0.89→0.99` | **0.99** |
+| Task | Domain | Bugs | Difficulty |
+|------|--------|------|------------|
+| `task_1_pr` | Security / Regex | 3 | Medium |
+| `task_2_pr` | Arithmetic Logic | 3 | Medium-Hard |
+| `task_3_pr` | Security + Async | 3 | Hard |
+| `task_4_pr` | Data Structures | 3 | Hard |
+| `task_5_pr` | Algorithms / Stats | 3 | Very Hard |
 
-The difficulty is visible in **two places**:
-1. **Step count** — task_3 requires more attempts to reach 0.90
-2. **Failed patch mid-trajectory** — task_3 produces a `0.01` (floor) mid-episode after a syntactically valid but semantically wrong patch (`def` instead of `async def`), which a weaker agent would not self-correct
+All tasks use **parametric factories** — each episode reset generates a fresh problem instance from a random seed so the agent cannot memorise expected values across episodes. The dense delta reward gives an RL agent a learning signal at every step, not just on success.
 
-A policy with random or shallow reasoning will plateau at 0.45 (one bug fixed) or 0.01 (floor — no bugs fixed). The dense gradient gives an RL agent the signal to improve.
+A policy with shallow pattern matching will plateau at partial credit (one or two bugs fixed). All three bugs must be fixed correctly to reach full score.
 
 ---
 
@@ -297,7 +310,7 @@ A policy with random or shallow reasoning will plateau at 0.45 (one bug fixed) o
 **Model:** `meta-llama/Llama-3.3-70B-Instruct` via HF Router (inference.py default)
 **Temperature:** `0.0` (fully deterministic — results are exactly reproducible)
 **Infrastructure:** 2 vCPU / 4 GB RAM (well within the 8 GB limit)
-**Runtime:** ~3 minutes for all 3 tasks
+**Runtime:** ~8 minutes for all 5 tasks
 
 ```
 [START] task=task_3_pr env=codereview-env model=meta-llama/Llama-3.3-70B-Instruct
@@ -331,7 +344,7 @@ A policy with random or shallow reasoning will plateau at 0.45 (one bug fixed) o
 [STEP] step=7 action={"action_type":"submit_review","summary":"Fixed quantity multiplication and discount percentage."} reward=0.99 done=true error=null
 [END] success=true steps=7 rewards=0.01,0.01,0.01,0.45,0.89,0.01,0.99
 
-[SUMMARY] tasks=3 scores=0.99,0.99,0.99 average=0.99
+[SUMMARY] tasks=5 scores=0.99,0.99,0.99,... average=0.99
 ```
 
 > Note: The dense trajectory is the key output for RL training. Step 5 of task_3 shows the grader
@@ -498,6 +511,8 @@ tasks:
   - task_1_pr
   - task_2_pr
   - task_3_pr
+  - task_4_pr
+  - task_5_pr
 action_model: AgentAction
 observation_model: CodeObservation
 state_model: ReviewState
@@ -519,7 +534,7 @@ openenv validate .
 # 2. Runtime validation (server must be running)
 openenv validate --url http://localhost:7860
 
-# 3. Verify all 3 tasks produce scores in [0.0, 1.0]
+# 3. Verify all 5 tasks produce scores in [0.0, 1.0]
 python3 inference.py
 
 # 4. Docker build

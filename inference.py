@@ -1,7 +1,7 @@
 """
 CodeReview-Env Inference Script
 ================================
-Runs an LLM agent against all 3 tasks in the CodeReview-Env sandbox.
+Runs an LLM agent against all 5 tasks in the CodeReview-Env sandbox.
 
 Required env vars:
   API_BASE_URL    - LLM API endpoint (default: HF Router)

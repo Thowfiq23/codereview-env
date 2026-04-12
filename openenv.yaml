@@ -9,22 +9,34 @@ port: 7860
 
 tasks:
   - id: task_1_pr
-    description: "Fix SQL injection vulnerability and weak MD5 hashing in authentication code"
+    description: "Fix 3 bugs in a user registration module: email regex, password length check, and MD5 hashing"
     steps: 10
-    difficulty: easy
+    difficulty: medium
     grader: tasks.grade_task_1_pr
 
   - id: task_2_pr
-    description: "Fix shopping cart quantity bug and incorrect discount percentage"
+    description: "Fix 3 arithmetic bugs in an order pricing engine: quantity multiply, discount direction, tax formula"
     steps: 10
-    difficulty: medium
+    difficulty: medium-hard
     grader: tasks.grade_task_2_pr
 
   - id: task_3_pr
-    description: "Fix hardcoded Stripe live key and synchronous payment processing bottleneck"
+    description: "Fix 3 bugs in an async payment processor: hardcoded API key, sync/async, retry off-by-one"
     steps: 10
     difficulty: hard
     grader: tasks.grade_task_3_pr
+
+  - id: task_4_pr
+    description: "Fix 3 bugs in an LRU cache + serializer: missing move-to-end, missing eviction, None crash"
+    steps: 10
+    difficulty: hard
+    grader: tasks.grade_task_4_pr
+
+  - id: task_5_pr
+    description: "Fix 3 algorithmic bugs in an analytics pipeline: EMA formula, population vs sample std, sliding window boundary"
+    steps: 10
+    difficulty: very-hard
+    grader: tasks.grade_task_5_pr
 
 action_model: AgentAction
 observation_model: CodeObservation
